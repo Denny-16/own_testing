@@ -5,7 +5,7 @@ import { useDispatch, useSelector } from "react-redux";
 import {
   addToast, setTimeHorizon, setThreshold, setInitialEquity,
 } from "../store/uiSlice";
-import { runOptimizeThunk } from "../store/uiSlice"; // NEW: thunk to hit backend
+import { runOptimizeThunk } from "../store/uiSlice"; // thunk to hit backend
 
 import EmptyState from "./EmptyState.js";
 import Skeleton from "./Skeleton.js";
@@ -25,7 +25,7 @@ import {
   fetchAllocation,
   backtestEvolution,
   stressSim,
-} from "../lib/mockApi.js";
+} from "../lib/api.js";
 
 // ---------- UI bits ----------
 const Card = ({ title, children, className = "" }) => (
@@ -67,8 +67,8 @@ export default function Dashboard() {
     dataset, riskLevel, options,
     initialEquity, timeHorizon, threshold,
     activeTab,
-    // NEW: backend call state
-    optimizeStatus, optimizeResult, optimizeError,
+    // backend call state (used only to disable button while running)
+    optimizeStatus,
   } = useSelector((s) => s.ui);
 
   // Safe risk label
@@ -236,15 +236,25 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stress, threshold, initialEquity, alloc]);
 
-  // Apply constraints (mock-ui)
-  async function handleApplyConstraints() {
+  // ---------- Single button handler (replaces Apply Constraints & Backend button on Home) ----------
+  async function handleRunQuantum() {
     try {
       setLoading((l) => ({ ...l, qaoa: true, alloc: true, frontier: true }));
+
+      // Fire backend optimize silently (preps for FastAPI later)
+      try {
+        await dispatch(runOptimizeThunk()).unwrap();
+      } catch {
+        // ignore errors from backend thunk for Home flow; demo endpoints still render
+      }
+
+      // Do the SAME work Apply Constraints used to do (keeps UI identical)
       const [bits, f] = await Promise.all([
         runQAOASelection({ constraints, threshold }),
         fetchEfficientFrontier({ riskLevel: safeRiskLevel, constraints, threshold }),
       ]);
       setTopBits(bits);
+
       const newAlloc = await fetchAllocation({
         topBits: bits[0]?.bits || "10101",
         hybrid: useHybrid,
@@ -253,35 +263,13 @@ export default function Dashboard() {
       });
       setAlloc(newAlloc);
       setFrontier(f);
-      dispatch(addToast({ type: "success", msg: "Constraints applied." }));
     } catch (e) {
       console.error(e);
-      dispatch(addToast({ type: "error", msg: "Failed to apply constraints." }));
+      dispatch(addToast({ type: "error", msg: "Failed to optimize. Try again." }));
     } finally {
       setLoading((l) => ({ ...l, qaoa: false, alloc: false, frontier: false }));
     }
   }
-
-  // ---------- NEW: Backend optimize → map to alloc ----------
-  // When optimizeResult arrives from backend, convert to the UI's alloc shape
-  useEffect(() => {
-    if (optimizeStatus === "succeeded" && optimizeResult) {
-      const { selected = [], weights = [] } = optimizeResult;
-      // Convert weights [0..1] -> percentage [0..100]
-      const allocFromBackend = selected.map((name, i) => ({
-        name,
-        value: Number(weights[i] || 0) * 100,
-      }));
-      setAlloc(allocFromBackend);
-      dispatch(addToast({ type: "success", msg: "Quantum optimization complete (backend)" }));
-    }
-  }, [optimizeStatus, optimizeResult, dispatch]);
-
-  useEffect(() => {
-    if (optimizeStatus === "failed" && optimizeError) {
-      dispatch(addToast({ type: "error", msg: String(optimizeError) }));
-    }
-  }, [optimizeStatus, optimizeError, dispatch]);
 
   // ---------- Derived ----------
   const datasetLabel =
@@ -358,7 +346,7 @@ export default function Dashboard() {
             </label>
           </div>
 
-          {/* Initial equity + Actions */}
+          {/* Initial equity + Single Action */}
           <div className="lg:col-span-1 space-y-4">
             <div>
               <label className="block text-zinc-300 mb-1">Initial Equity (₹)</label>
@@ -374,22 +362,14 @@ export default function Dashboard() {
 
             <div className="flex flex-col sm:flex-row gap-2">
               <button
-                onClick={handleApplyConstraints}
+                onClick={handleRunQuantum}
                 className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm disabled:opacity-60"
-                disabled={loading.qaoa || loading.alloc || loading.frontier}
-                title="Mock UI: recompute with local mock data"
+                disabled={loading.qaoa || loading.alloc || loading.frontier || optimizeStatus === "loading"}
+                title="Runs the full optimization flow"
               >
-                {(loading.qaoa || loading.alloc || loading.frontier) ? "Applying..." : "Apply Constraints"}
-              </button>
-
-              {/* NEW: Backend call */}
-              <button
-                onClick={() => dispatch(runOptimizeThunk())}
-                className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm disabled:opacity-60"
-                disabled={optimizeStatus === "loading"}
-                title="Calls backend /api/optimize (mock or live FastAPI)"
-              >
-                {optimizeStatus === "loading" ? "Optimizing..." : "Run Quantum Optimize (Backend)"}
+                {(loading.qaoa || loading.alloc || loading.frontier || optimizeStatus === "loading")
+                  ? "Optimizing..."
+                  : "Run Quantum Optimize"}
               </button>
             </div>
           </div>
@@ -400,7 +380,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card title="Chosen Companies (by Constraints / Backend)">
           {!alloc?.length ? (
-            <EmptyState title="No allocation yet" subtitle="Apply constraints or run backend optimize." />
+            <EmptyState title="No allocation yet" subtitle="Click Run Quantum Optimize." />
           ) : (
             <div className="overflow-auto">
               <table className="w-full text-sm">
@@ -428,7 +408,7 @@ export default function Dashboard() {
         <Card title="Allocation (Pie)">
           <div className="h-[280px]">
             {!alloc?.length ? (
-              <EmptyState title="No allocation yet" subtitle="Apply constraints or run backend optimize." />
+              <EmptyState title="No allocation yet" subtitle="Click Run Quantum Optimize." />
             ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
@@ -529,10 +509,9 @@ export default function Dashboard() {
                 </p>
               </div>
 
-              {/* keep your existing section bodies exactly as-is */}
+              {/* Section bodies (unchanged) */}
               {activeTab === "compare" && (
                 <>
-                  {/* Time + Rebalancing + Hybrid + Apply */}
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                     <Card title="Time (days)">
                       <input
@@ -566,13 +545,13 @@ export default function Dashboard() {
                     </Card>
                     <Card title="Actions">
                       <button
-                        onClick={handleApplyConstraints}
+                        onClick={handleRunQuantum}
                         className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm disabled:opacity-60"
-                        disabled={loading.qaoa || loading.alloc || loading.frontier}
+                        disabled={loading.qaoa || loading.alloc || loading.frontier || optimizeStatus === "loading"}
                       >
-                        {(loading.qaoa || loading.alloc || loading.frontier)
-                          ? "Applying..."
-                          : "Apply Constraints"}
+                        {(loading.qaoa || loading.alloc || loading.frontier || optimizeStatus === "loading")
+                          ? "Optimizing..."
+                          : "Run Quantum Optimize"}
                       </button>
                     </Card>
                   </div>
@@ -584,7 +563,7 @@ export default function Dashboard() {
                         {loading.frontier ? (
                           <Skeleton className="h-full w-full" />
                         ) : !frontier?.length ? (
-                          <EmptyState title="No frontier yet" subtitle="Adjust constraints and click Apply." />
+                          <EmptyState title="No frontier yet" subtitle="Click Run Quantum Optimize." />
                         ) : (
                           <ResponsiveContainer width="100%" height="100%">
                             <LineChart data={frontier} margin={{ top: 10, right: 15, left: 16, bottom: 8 }}>
@@ -614,7 +593,7 @@ export default function Dashboard() {
                           {loading.sharpe ? (
                             <Skeleton className="h-full w-full" />
                           ) : !sharpeData?.length ? (
-                            <EmptyState title="No Sharpe data" subtitle="Try applying constraints." />
+                            <EmptyState title="No Sharpe data" subtitle="Run optimization." />
                           ) : (
                             <ResponsiveContainer width="100%" height="100%">
                               <BarChart data={sharpeData} margin={{ top: 10, right: 15, left: 10, bottom: 24 }}>
@@ -642,7 +621,7 @@ export default function Dashboard() {
                         {loading.alloc ? (
                           <Skeleton className="h-full w-full" />
                         ) : !alloc?.length ? (
-                          <EmptyState title="No allocation yet" subtitle="Apply constraints to generate weights." />
+                          <EmptyState title="No allocation yet" subtitle="Click Run Quantum Optimize." />
                         ) : (
                           <ResponsiveContainer width="100%" height="100%">
                             <PieChart margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
@@ -895,7 +874,7 @@ export default function Dashboard() {
               {activeTab === "explain" && (
                 <Card title="Top Measured Portfolios (Demo)">
                   {!topBits?.length ? (
-                    <EmptyState title="No solutions yet" subtitle="Apply constraints to compute candidate bitstrings." />
+                    <EmptyState title="No solutions yet" subtitle="Click Run Quantum Optimize." />
                   ) : (
                     <div className="overflow-auto border border-zinc-800/70 rounded-xl">
                       <table className="w-full text-sm">

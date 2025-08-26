@@ -23,6 +23,8 @@ const optimizeRouter = require('./routes/optimize.routes');
 app.use('/api', optimizeRouter);
 const quantumHealthRouter = require('./routes/quantum.health.routes');
 app.use('/api', quantumHealthRouter);
+const demoRouter = require('./routes/demo.routes');
+app.use('/api', demoRouter);
 
 // start server
 app.listen(config.port, () => {
