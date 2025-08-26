@@ -1,9 +1,77 @@
-import { createSlice } from "@reduxjs/toolkit";
+import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
 
+/* ---------- ENV (Parcel) ---------- */
+const API_BASE_URL = process.env.API_BASE_URL || "http://localhost:5000";
+
+/* ---------- Helpers: map UI -> backend payload (Mode A) ---------- */
+const datasetMap = {
+  nifty50: "NIFTY50",
+  nasdaq100: "NASDAQ100",
+  crypto50: "CRYPTO50",
+};
+
+export function buildOptimizePayload(ui) {
+  return {
+    mode: "dataset",
+    dataset: datasetMap[ui.dataset] || "NIFTY50",
+    timeHorizon: Number(ui.timeHorizon) || 15,
+    riskLevel: ui.riskLevel || "medium",
+    budget: Number(ui.initialEquity) || 100000,
+    // if options are selected tickers, cap by that; otherwise a sane default
+    maxAssets: (ui.options?.length || 0) > 0 ? ui.options.length : 10,
+    objective: "sharpe",
+    qaoaParams: {
+      // you can tune based on riskLevel later if you want
+      // p: ui.riskLevel === "high" ? 3 : ui.riskLevel === "low" ? 1 : 2,
+      // shots: 2000,
+      // seed: 42,
+    },
+    constraints: {
+      // threshold (%) -> minWeight in [0,1]
+      minWeight: (Number(ui.threshold) || 0) / 100,
+      maxWeight: 1,
+    },
+    // if your UI `options` is a list of tickers to include, pass it here
+    include: Array.isArray(ui.options) ? ui.options : [],
+    exclude: [],
+  };
+}
+
+/* ---------- Async thunk to call backend ---------- */
+export const runOptimizeThunk = createAsyncThunk(
+  "ui/runOptimize",
+  async (_, { getState, rejectWithValue }) => {
+    const { ui } = getState();
+    const payload = buildOptimizePayload(ui);
+
+    try {
+      const resp = await fetch(`${API_BASE_URL}/api/optimize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!resp.ok) {
+        // try to parse error body
+        const err = await resp.json().catch(() => ({}));
+        const msg = err?.details?.join?.(", ") || err?.details || err?.error || `Request failed: ${resp.status}`;
+        return rejectWithValue(msg);
+      }
+
+      const data = await resp.json(); // { runId, weights, selected, sharpe, ... }
+      return data;
+    } catch (e) {
+      return rejectWithValue(e?.message || "Network error");
+    }
+  }
+);
+
+/* ---------- Load saved UI ---------- */
 const saved = (() => {
   try { return JSON.parse(localStorage.getItem("ui") || "{}"); } catch { return {}; }
 })();
 
+/* ---------- Initial state ---------- */
 const initialState = {
   // core
   dataset: saved.dataset ?? "nifty50",
@@ -21,10 +89,16 @@ const initialState = {
   // ui
   isAboutOpen: false,
   toasts: [],
+
+  // optimize call state
+  optimizeStatus: "idle",      // 'idle' | 'loading' | 'succeeded' | 'failed'
+  optimizeResult: null,        // { runId, weights, selected, sharpe, ... }
+  optimizeError: null,         // string
 };
 
 let toastId = 1;
 
+/* ---------- Slice ---------- */
 const uiSlice = createSlice({
   name: "ui",
   initialState,
@@ -48,8 +122,37 @@ const uiSlice = createSlice({
     // about + toasts
     openAbout: (s) => { s.isAboutOpen = true; },
     closeAbout: (s) => { s.isAboutOpen = false; },
-    addToast: (s, a) => { s.toasts.push({ id: toastId++, type: a.payload.type ?? "info", msg: a.payload.msg }); },
+    addToast: (s, a) => {
+      s.toasts.push({ id: toastId++, type: a.payload?.type ?? "info", msg: a.payload?.msg ?? "" });
+    },
     removeToast: (s, a) => { s.toasts = s.toasts.filter(t => t.id !== a.payload); },
+
+    // allow clearing results if user changes inputs
+    clearOptimizeResult: (s) => {
+      s.optimizeResult = null;
+      s.optimizeError = null;
+      s.optimizeStatus = "idle";
+    },
+  },
+  extraReducers: (builder) => {
+    builder
+      .addCase(runOptimizeThunk.pending, (s) => {
+        s.optimizeStatus = "loading";
+        s.optimizeError = null;
+        // optional: keep previous result or clear it
+      })
+      .addCase(runOptimizeThunk.fulfilled, (s, a) => {
+        s.optimizeStatus = "succeeded";
+        s.optimizeResult = a.payload;
+        s.optimizeError = null;
+        // optional toast
+        s.toasts.push({ id: toastId++, type: "success", msg: "Optimization complete" });
+      })
+      .addCase(runOptimizeThunk.rejected, (s, a) => {
+        s.optimizeStatus = "failed";
+        s.optimizeError = a.payload || "Failed to optimize";
+        s.toasts.push({ id: toastId++, type: "error", msg: s.optimizeError });
+      });
   },
 });
 
@@ -58,11 +161,12 @@ export const {
   setDataset, setRiskLevel, setOptions,
   setInitialEquity, setTimeHorizon, setThreshold,
   openAbout, closeAbout, addToast, removeToast,
+  clearOptimizeResult,
 } = uiSlice.actions;
 
 export default uiSlice.reducer;
 
-// persist some fields
+/* ---------- Persist select fields ---------- */
 export const uiMiddleware = store => next => action => {
   const res = next(action);
   const { ui } = store.getState();

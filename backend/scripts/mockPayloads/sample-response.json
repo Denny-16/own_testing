@@ -1,0 +1,16 @@
+{
+  "runId": "mock",
+  "method": "quantum",
+  "weights": [0.38, 0.27, 0.35],
+  "selected": ["INFY", "TCS", "HDFCBANK"],
+  "expectedReturn": 0.126,
+  "risk": 0.048,
+  "sharpe": 1.85,
+  "diagnostics": {
+    "iterations": 22,
+    "convergence": true,
+    "backend": "qiskit-simulator",
+    "runtimeMs": 1410,
+    "notes": "Mock response for Mode A dataset run"
+  }
+}

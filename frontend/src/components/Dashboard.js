@@ -2,16 +2,20 @@
 import React, { useEffect, useMemo, useState } from "react";
 import Navbar from "./Navbar.js";
 import { useDispatch, useSelector } from "react-redux";
-import { addToast, setTimeHorizon, setThreshold, setInitialEquity } from "../store/uiSlice";
+import {
+  addToast, setTimeHorizon, setThreshold, setInitialEquity,
+} from "../store/uiSlice";
+import { runOptimizeThunk } from "../store/uiSlice"; // NEW: thunk to hit backend
+
 import EmptyState from "./EmptyState.js";
 import Skeleton from "./Skeleton.js";
-import { downloadJSON, downloadCSV } from "../utils/exporters.js"; // (ok if unused)
+import { downloadJSON, downloadCSV } from "../utils/exporters.js";
 import InsightsPanel from "./InsightsPanel.js";
 
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend, BarChart, Bar, CartesianGrid, Label,
-  ReferenceLine, // <-- needed for the dashed threshold line
+  ReferenceLine,
 } from "recharts";
 
 import {
@@ -58,10 +62,13 @@ const tooltipStyles = {
 
 export default function Dashboard() {
   const dispatch = useDispatch();
+
   const {
     dataset, riskLevel, options,
     initialEquity, timeHorizon, threshold,
     activeTab,
+    // NEW: backend call state
+    optimizeStatus, optimizeResult, optimizeError,
   } = useSelector((s) => s.ui);
 
   // Safe risk label
@@ -83,12 +90,12 @@ export default function Dashboard() {
   // Data
   const [frontier, setFrontier] = useState([]);
   const [sharpeData, setSharpeData] = useState([]);
-  const [alloc, setAlloc] = useState([]);
+  const [alloc, setAlloc] = useState([]); // [{name, value}] with value in %
   const [evolution, setEvolution] = useState([]);
   const [topBits, setTopBits] = useState([]);
   const [stressed, setStressed] = useState({ bars: [], ruinLine: 0 });
 
-  // Loading flags
+  // Loading flags (for mock-ui)
   const [loading, setLoading] = useState({
     frontier: false, sharpe: false, qaoa: false, alloc: false, evo: false, stress: false
   });
@@ -100,7 +107,7 @@ export default function Dashboard() {
   );
 
   // ---------- Effects ----------
-  // Initial load
+  // Initial load (mock-ui data)
   useEffect(() => {
     (async () => {
       try {
@@ -134,7 +141,7 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Frontier updates
+  // Frontier updates (mock-ui)
   useEffect(() => {
     (async () => {
       try {
@@ -151,7 +158,7 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [safeRiskLevel, threshold, constraints]);
 
-  // Evolution updates
+  // Evolution updates (mock-ui)
   useEffect(() => {
     (async () => {
       try {
@@ -168,7 +175,7 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rebalanceFreq, useHybrid, initialEquity, timeHorizon]);
 
-  // Threshold → re-run QAOA + allocation + frontier
+  // Threshold → re-run QAOA + allocation + frontier (mock-ui)
   useEffect(() => {
     (async () => {
       try {
@@ -197,20 +204,18 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threshold, useHybrid, constraints, safeRiskLevel]);
 
-  // Stress chart: recompute when shocks / threshold / equity / alloc change
+  // Stress chart: recompute when shocks / threshold / equity / alloc change (mock-ui)
   useEffect(() => {
     (async () => {
       try {
         setLoading((l) => ({ ...l, stress: true }));
         const res = await stressSim({
-          alloc,          // [{name, value}, ...] from the pie
-          initialEquity,  // rupees
-          threshold,      // percentage
-          stress,         // sliders
+          alloc,
+          initialEquity,
+          threshold,
+          stress,
         });
 
-        // Backward-compatible adapter:
-        // If mock returns an array (old shape), convert it to {bars, ruinLine}
         if (Array.isArray(res)) {
           setStressed({ bars: res, ruinLine: (Number(threshold) / 100) * Number(initialEquity || 0) });
         } else {
@@ -231,7 +236,7 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stress, threshold, initialEquity, alloc]);
 
-  // Apply constraints -> QAOA + alloc + frontier
+  // Apply constraints (mock-ui)
   async function handleApplyConstraints() {
     try {
       setLoading((l) => ({ ...l, qaoa: true, alloc: true, frontier: true }));
@@ -256,6 +261,27 @@ export default function Dashboard() {
       setLoading((l) => ({ ...l, qaoa: false, alloc: false, frontier: false }));
     }
   }
+
+  // ---------- NEW: Backend optimize → map to alloc ----------
+  // When optimizeResult arrives from backend, convert to the UI's alloc shape
+  useEffect(() => {
+    if (optimizeStatus === "succeeded" && optimizeResult) {
+      const { selected = [], weights = [] } = optimizeResult;
+      // Convert weights [0..1] -> percentage [0..100]
+      const allocFromBackend = selected.map((name, i) => ({
+        name,
+        value: Number(weights[i] || 0) * 100,
+      }));
+      setAlloc(allocFromBackend);
+      dispatch(addToast({ type: "success", msg: "Quantum optimization complete (backend)" }));
+    }
+  }, [optimizeStatus, optimizeResult, dispatch]);
+
+  useEffect(() => {
+    if (optimizeStatus === "failed" && optimizeError) {
+      dispatch(addToast({ type: "error", msg: String(optimizeError) }));
+    }
+  }, [optimizeStatus, optimizeError, dispatch]);
 
   // ---------- Derived ----------
   const datasetLabel =
@@ -332,7 +358,7 @@ export default function Dashboard() {
             </label>
           </div>
 
-          {/* Initial equity + Apply */}
+          {/* Initial equity + Actions */}
           <div className="lg:col-span-1 space-y-4">
             <div>
               <label className="block text-zinc-300 mb-1">Initial Equity (₹)</label>
@@ -346,42 +372,54 @@ export default function Dashboard() {
               />
             </div>
 
-            <button
-              onClick={handleApplyConstraints}
-              className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm disabled:opacity-60"
-              disabled={loading.qaoa || loading.alloc || loading.frontier}
-            >
-              {(loading.qaoa || loading.alloc || loading.frontier) ? "Applying..." : "Apply Constraints"}
-            </button>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <button
+                onClick={handleApplyConstraints}
+                className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm disabled:opacity-60"
+                disabled={loading.qaoa || loading.alloc || loading.frontier}
+                title="Mock UI: recompute with local mock data"
+              >
+                {(loading.qaoa || loading.alloc || loading.frontier) ? "Applying..." : "Apply Constraints"}
+              </button>
+
+              {/* NEW: Backend call */}
+              <button
+                onClick={() => dispatch(runOptimizeThunk())}
+                className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm disabled:opacity-60"
+                disabled={optimizeStatus === "loading"}
+                title="Calls backend /api/optimize (mock or live FastAPI)"
+              >
+                {optimizeStatus === "loading" ? "Optimizing..." : "Run Quantum Optimize (Backend)"}
+              </button>
+            </div>
           </div>
         </div>
       </Card>
 
       {/* Two-pane results */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card title="Chosen Companies (by Constraints)">
+        <Card title="Chosen Companies (by Constraints / Backend)">
           {!alloc?.length ? (
-            <EmptyState title="No allocation yet" subtitle="Apply constraints to generate weights." />
+            <EmptyState title="No allocation yet" subtitle="Apply constraints or run backend optimize." />
           ) : (
             <div className="overflow-auto">
               <table className="w-full text-sm">
                 <thead className="bg-[#0f1422] text-zinc-300">
-  <tr>
-    <th className="text-left p-3">Company</th>
-    <th className="text-right p-3">Weight</th>
-    <th className="text-right p-3">Allocation (₹)</th>
-  </tr>
-</thead>
-<tbody>
-  {alloc.map((row, i) => (
-    <tr key={i} className="border-t border-zinc-800/50">
-      <td className="p-3">{row.name}</td>
-      <td className="p-3 text-right">{percent(row.value, 0)}</td>
-      <td className="p-3 text-right">{currency(initialEquity * (row.value / 100))}</td>
-    </tr>
-  ))}
-</tbody>
-
+                  <tr>
+                    <th className="text-left p-3">Company</th>
+                    <th className="text-right p-3">Weight</th>
+                    <th className="text-right p-3">Allocation (₹)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {alloc.map((row, i) => (
+                    <tr key={i} className="border-t border-zinc-800/50">
+                      <td className="p-3">{row.name}</td>
+                      <td className="p-3 text-right">{percent(row.value, 0)}</td>
+                      <td className="p-3 text-right">{currency(initialEquity * (row.value / 100))}</td>
+                    </tr>
+                  ))}
+                </tbody>
               </table>
             </div>
           )}
@@ -390,7 +428,7 @@ export default function Dashboard() {
         <Card title="Allocation (Pie)">
           <div className="h-[280px]">
             {!alloc?.length ? (
-              <EmptyState title="No allocation yet" subtitle="Apply constraints to generate weights." />
+              <EmptyState title="No allocation yet" subtitle="Apply constraints or run backend optimize." />
             ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
@@ -491,7 +529,7 @@ export default function Dashboard() {
                 </p>
               </div>
 
-              {/* Section bodies */}
+              {/* keep your existing section bodies exactly as-is */}
               {activeTab === "compare" && (
                 <>
                   {/* Time + Rebalancing + Hybrid + Apply */}
@@ -528,15 +566,14 @@ export default function Dashboard() {
                     </Card>
                     <Card title="Actions">
                       <button
-  onClick={handleApplyConstraints}
-  className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm disabled:opacity-60"
-  disabled={loading.qaoa || loading.alloc || loading.frontier}
->
-  {(loading.qaoa || loading.alloc || loading.frontier)
-    ? "Applying..."
-    : "Apply Constraints"}
-</button>
-
+                        onClick={handleApplyConstraints}
+                        className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm disabled:opacity-60"
+                        disabled={loading.qaoa || loading.alloc || loading.frontier}
+                      >
+                        {(loading.qaoa || loading.alloc || loading.frontier)
+                          ? "Applying..."
+                          : "Apply Constraints"}
+                      </button>
                     </Card>
                   </div>
 
@@ -663,7 +700,6 @@ export default function Dashboard() {
 
               {activeTab === "evolution" && (
                 <>
-                  {/* Time + Rebalance + Hybrid */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                     <Card title="Time (days)">
                       <input
@@ -775,7 +811,7 @@ export default function Dashboard() {
                           onChange={(e) => setStress({ ...stress, techPct: Number(e.target.value) })}
                           className="w-full accent-indigo-500"
                         />
-                                                <div className="text-zinc-400 mt-1">{stress.techPct}%</div>
+                        <div className="text-zinc-400 mt-1">{stress.techPct}%</div>
                       </div>
                       <div>
                         <label className="block text-zinc-300 mb-1">FX Shock (±%)</label>
@@ -834,7 +870,6 @@ export default function Dashboard() {
                               itemStyle={{ color: "#E5E7EB", fontSize: 12 }}
                               wrapperStyle={{ zIndex: 50 }}
                             />
-                            {/* Green dashed ruin threshold line */}
                             <ReferenceLine
                               y={stressed.ruinLine}
                               stroke="#22c55e"
