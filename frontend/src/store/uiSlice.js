@@ -6,7 +6,9 @@ const API_BASE_URL = process.env.API_BASE_URL || "http://localhost:5000";
 /* ---------- Helpers: map UI -> backend payload (Mode A) ---------- */
 const datasetMap = {
   nifty50: "NIFTY50",
+  nasdaq: "NASDAQ100",
   nasdaq100: "NASDAQ100",
+  crypto: "CRYPTO50",
   crypto50: "CRYPTO50",
 };
 
@@ -16,22 +18,15 @@ export function buildOptimizePayload(ui) {
     dataset: datasetMap[ui.dataset] || "NIFTY50",
     timeHorizon: Number(ui.timeHorizon) || 15,
     riskLevel: ui.riskLevel || "medium",
-    budget: Number(ui.initialEquity) || 100000,
-    // if options are selected tickers, cap by that; otherwise a sane default
-    maxAssets: (ui.options?.length || 0) > 0 ? ui.options.length : 10,
+    budget: Number(ui.initialEquity) || 100000, // total_investment
+    maxAssets: Math.max(1, Math.floor(Number(ui.maxAssets) || 5)), // number of assets to pick
     objective: "sharpe",
-    qaoaParams: {
-      // you can tune based on riskLevel later if you want
-      // p: ui.riskLevel === "high" ? 3 : ui.riskLevel === "low" ? 1 : 2,
-      // shots: 2000,
-      // seed: 42,
-    },
+    qaoaParams: {},
     constraints: {
-      // threshold (%) -> minWeight in [0,1]
+      // optional knobs (kept for future, currently not used by FastAPI)
       minWeight: (Number(ui.threshold) || 0) / 100,
       maxWeight: 1,
     },
-    // if your UI `options` is a list of tickers to include, pass it here
     include: Array.isArray(ui.options) ? ui.options : [],
     exclude: [],
   };
@@ -52,13 +47,16 @@ export const runOptimizeThunk = createAsyncThunk(
       });
 
       if (!resp.ok) {
-        // try to parse error body
         const err = await resp.json().catch(() => ({}));
-        const msg = err?.details?.join?.(", ") || err?.details || err?.error || `Request failed: ${resp.status}`;
+        const msg =
+          err?.details?.join?.(", ") ||
+          err?.details ||
+          err?.error ||
+          `Request failed: ${resp.status}`;
         return rejectWithValue(msg);
       }
 
-      const data = await resp.json(); // { runId, weights, selected, sharpe, ... }
+      const data = await resp.json(); // normalized shape from backend
       return data;
     } catch (e) {
       return rejectWithValue(e?.message || "Network error");
@@ -68,7 +66,11 @@ export const runOptimizeThunk = createAsyncThunk(
 
 /* ---------- Load saved UI ---------- */
 const saved = (() => {
-  try { return JSON.parse(localStorage.getItem("ui") || "{}"); } catch { return {}; }
+  try {
+    return JSON.parse(localStorage.getItem("ui") || "{}");
+  } catch {
+    return {};
+  }
 })();
 
 /* ---------- Initial state ---------- */
@@ -79,21 +81,24 @@ const initialState = {
   options: saved.options ?? [],
 
   // tunables
-  initialEquity: saved.initialEquity ?? 108000,
-  timeHorizon: saved.timeHorizon ?? 15, // days
-  threshold: saved.threshold ?? 0,      // %
+  initialEquity: saved.initialEquity ?? 108000, // total_investment
+  timeHorizon: saved.timeHorizon ?? 15,         // (kept for charts)
+  threshold: saved.threshold ?? 0,              // %
+
+  // NEW: FastAPI input — number of assets to select
+  maxAssets: saved.maxAssets ?? 5,
 
   // nav
-  activeTab: saved.activeTab ?? null,   // null = Home, else 'compare'|'evolution'|'insights'|'stress'|'explain'
+  activeTab: saved.activeTab ?? null, // null = Home, else 'compare'|'evolution'|'insights'|'stress'|'explain'
 
   // ui
   isAboutOpen: false,
   toasts: [],
 
   // optimize call state
-  optimizeStatus: "idle",      // 'idle' | 'loading' | 'succeeded' | 'failed'
-  optimizeResult: null,        // { runId, weights, selected, sharpe, ... }
-  optimizeError: null,         // string
+  optimizeStatus: "idle", // 'idle' | 'loading' | 'succeeded' | 'failed'
+  optimizeResult: null,   // normalized JSON from backend
+  optimizeError: null,    // string
 };
 
 let toastId = 1;
@@ -110,22 +115,50 @@ const uiSlice = createSlice({
     },
 
     // basic filters
-    setDataset: (s, a) => { s.dataset = a.payload; },
-    setRiskLevel: (s, a) => { s.riskLevel = a.payload; }, // 'low'|'medium'|'high'
-    setOptions: (s, a) => { s.options = a.payload; },
+    setDataset: (s, a) => {
+      s.dataset = a.payload;
+    },
+    setRiskLevel: (s, a) => {
+      s.riskLevel = a.payload; // 'low'|'medium'|'high'
+    },
+    setOptions: (s, a) => {
+      s.options = a.payload;
+    },
 
     // tunables
-    setInitialEquity: (s, a) => { s.initialEquity = Number(a.payload) || 0; },
-    setTimeHorizon: (s, a) => { s.timeHorizon = Math.max(1, Number(a.payload) || 1); },
-    setThreshold: (s, a) => { s.threshold = Math.max(0, Math.min(100, Number(a.payload) || 0)); },
+    setInitialEquity: (s, a) => {
+      s.initialEquity = Number(a.payload) || 0;
+    },
+    setTimeHorizon: (s, a) => {
+      s.timeHorizon = Math.max(1, Number(a.payload) || 1);
+    },
+    setThreshold: (s, a) => {
+      s.threshold = Math.max(0, Math.min(100, Number(a.payload) || 0));
+    },
+
+    // NEW: FastAPI "budget" (count of assets)
+    setMaxAssets: (s, a) => {
+      const v = Math.max(1, Math.floor(Number(a.payload) || 1));
+      s.maxAssets = v;
+    },
 
     // about + toasts
-    openAbout: (s) => { s.isAboutOpen = true; },
-    closeAbout: (s) => { s.isAboutOpen = false; },
-    addToast: (s, a) => {
-      s.toasts.push({ id: toastId++, type: a.payload?.type ?? "info", msg: a.payload?.msg ?? "" });
+    openAbout: (s) => {
+      s.isAboutOpen = true;
     },
-    removeToast: (s, a) => { s.toasts = s.toasts.filter(t => t.id !== a.payload); },
+    closeAbout: (s) => {
+      s.isAboutOpen = false;
+    },
+    addToast: (s, a) => {
+      s.toasts.push({
+        id: toastId++,
+        type: a.payload?.type ?? "info",
+        msg: a.payload?.msg ?? "",
+      });
+    },
+    removeToast: (s, a) => {
+      s.toasts = s.toasts.filter((t) => t.id !== a.payload);
+    },
 
     // allow clearing results if user changes inputs
     clearOptimizeResult: (s) => {
@@ -139,13 +172,11 @@ const uiSlice = createSlice({
       .addCase(runOptimizeThunk.pending, (s) => {
         s.optimizeStatus = "loading";
         s.optimizeError = null;
-        // optional: keep previous result or clear it
       })
       .addCase(runOptimizeThunk.fulfilled, (s, a) => {
         s.optimizeStatus = "succeeded";
         s.optimizeResult = a.payload;
         s.optimizeError = null;
-        // optional toast
         s.toasts.push({ id: toastId++, type: "success", msg: "Optimization complete" });
       })
       .addCase(runOptimizeThunk.rejected, (s, a) => {
@@ -158,16 +189,24 @@ const uiSlice = createSlice({
 
 export const {
   setActiveTab,
-  setDataset, setRiskLevel, setOptions,
-  setInitialEquity, setTimeHorizon, setThreshold,
-  openAbout, closeAbout, addToast, removeToast,
+  setDataset,
+  setRiskLevel,
+  setOptions,
+  setInitialEquity,
+  setTimeHorizon,
+  setThreshold,
+  setMaxAssets, // NEW
+  openAbout,
+  closeAbout,
+  addToast,
+  removeToast,
   clearOptimizeResult,
 } = uiSlice.actions;
 
 export default uiSlice.reducer;
 
 /* ---------- Persist select fields ---------- */
-export const uiMiddleware = store => next => action => {
+export const uiMiddleware = (store) => (next) => (action) => {
   const res = next(action);
   const { ui } = store.getState();
   const persist = {
@@ -178,7 +217,10 @@ export const uiMiddleware = store => next => action => {
     timeHorizon: ui.timeHorizon,
     threshold: ui.threshold,
     activeTab: ui.activeTab,
+    maxAssets: ui.maxAssets, // NEW
   };
-  try { localStorage.setItem("ui", JSON.stringify(persist)); } catch {}
+  try {
+    localStorage.setItem("ui", JSON.stringify(persist));
+  } catch {}
   return res;
 };

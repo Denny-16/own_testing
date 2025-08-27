@@ -1,0 +1,15 @@
+{
+  "dataset": "NIFTY50",
+  "budget": 5,
+  "risk_factor": "medium",
+  "gamma": 0.5,
+  "total_investment": 100000,
+  "objective_value": -0.00743643839706022,
+  "portfolio": [
+    { "asset": "Bajaj Auto", "expected_return": 0.0020460564045003, "weight": 0.24418237889532673, "investment": 24418.237889532673, "percentage": 24.418237889532673 },
+    { "asset": "Sun Pharmaceutical", "expected_return": 0.0014023833272254, "weight": 0.16736454391572536, "investment": 16736.454391572537, "percentage": 16.736454391572536 },
+    { "asset": "Bharti Airtel", "expected_return": 0.001468983819422, "weight": 0.1753128422052523, "investment": 17531.28422052523, "percentage": 17.53128422052523 },
+    { "asset": "Mahindra & Mahindra", "expected_return": 0.0019594256215045, "weight": 0.2338436068893587, "investment": 23384.36068893587, "percentage": 23.38436068893587 },
+    { "asset": "HCL Technologies", "expected_return": 0.0015023648138631, "weight": 0.1792966280943369, "investment": 17929.662809433692, "percentage": 17.92966280943369 }
+  ]
+}

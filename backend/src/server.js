@@ -19,12 +19,18 @@ app.use(requestLogger);
 
 // routes
 app.use('/api', healthRouter);
-const optimizeRouter = require('./routes/optimize.routes');
-app.use('/api', optimizeRouter);
+const optimizeRoutes = require("./routes/optimize.routes");
+// ...
+app.use("/api", optimizeRoutes);
+
 const quantumHealthRouter = require('./routes/quantum.health.routes');
 app.use('/api', quantumHealthRouter);
 const demoRouter = require('./routes/demo.routes');
 app.use('/api', demoRouter);
+const compareRoutes = require("./routes/compare.routes");
+
+// ...
+app.use("/api/compare", compareRoutes);
 
 // start server
 app.listen(config.port, () => {

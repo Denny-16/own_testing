@@ -1,7 +1,9 @@
-const express = require('express');
-const { optimizeController } = require('../controllers/optimize.controller');
-
+const express = require("express");
 const router = express.Router();
-router.post('/optimize', optimizeController);
+
+// IMPORTANT: path and name must match exactly
+const { optimizeHandler } = require("../controllers/optimize.controller");
+
+router.post("/optimize", optimizeHandler);
 
 module.exports = router;

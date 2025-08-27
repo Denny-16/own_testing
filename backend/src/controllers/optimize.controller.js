@@ -1,26 +1,25 @@
-const { OptimizeRequestSchema } = require('../utils/validate');
-const { callQuantumOptimize } = require('../services/quantum.service');
+// src/controllers/optimize.controller.js
+const { OptimizeRequestSchema } = require("../utils/validate");
+const { callQuantumOptimizeJSON } = require("../services/quantum.service");
 
-async function optimizeController(req, res, next) {
+async function optimizeHandler(req, res, next) {
   try {
-    // Validate incoming body against Mode A schema
-    const parsed = OptimizeRequestSchema.parse(req.body);
-
-    // Call service (mock if MOCK_MODE=true, else FastAPI)
-    const result = await callQuantumOptimize(parsed);
-
-    return res.status(200).json(result);
-  } catch (e) {
-    // zod validation errors => 422 via error middleware
-    if (e?.issues) {
-      const err = new Error('Invalid payload');
-      err.type = 'validation';
-      err.details = e.issues.map(i => i.message);
-      return next(err);
+    const payload = OptimizeRequestSchema.parse(req.body);
+    const result = await callQuantumOptimizeJSON(payload);
+    res.json(result);
+  } catch (err) {
+    if (err?.issues) {
+      // zod validation error
+      return res.status(400).json({
+        error: "Invalid request",
+        details: err.issues.map(i => i.message),
+      });
     }
-    // otherwise bubble up to error middleware
-    return next(e);
+    const status = err?.type === "upstream_timeout" ? 504
+                : err?.type === "upstream_unavailable" ? 502
+                : 500;
+    res.status(status).json({ error: err.message || "Internal error" });
   }
 }
 
-module.exports = { optimizeController };
+module.exports = { optimizeHandler };

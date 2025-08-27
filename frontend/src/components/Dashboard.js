@@ -3,9 +3,14 @@ import React, { useEffect, useMemo, useState } from "react";
 import Navbar from "./Navbar.js";
 import { useDispatch, useSelector } from "react-redux";
 import {
-  addToast, setTimeHorizon, setThreshold, setInitialEquity,
+  addToast,
+  setTimeHorizon,
+  setThreshold,
+  setInitialEquity,
+  setRiskLevel,
+  setMaxAssets,
 } from "../store/uiSlice";
-import { runOptimizeThunk } from "../store/uiSlice"; // thunk to hit backend
+import { runOptimizeThunk } from "../store/uiSlice";
 
 import EmptyState from "./EmptyState.js";
 import Skeleton from "./Skeleton.js";
@@ -15,7 +20,7 @@ import InsightsPanel from "./InsightsPanel.js";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend, BarChart, Bar, CartesianGrid, Label,
-  ReferenceLine,
+  ReferenceLine, ScatterChart, Scatter
 } from "recharts";
 
 import {
@@ -25,6 +30,8 @@ import {
   fetchAllocation,
   backtestEvolution,
   stressSim,
+  fetchCompareAccuracy,         // <-- add
+  fetchCompareRiskReturn,       // <-- add
 } from "../lib/api.js";
 
 // ---------- UI bits ----------
@@ -59,6 +66,26 @@ const tooltipStyles = {
   itemStyle: { color: "#E5E7EB", fontSize: 12 },
   wrapperStyle: { zIndex: 50 },
 };
+// Clean, company-centric tooltip for the Compare scatter
+function CompareTooltip({ active, payload }) {
+  if (!active || !Array.isArray(payload) || !payload.length) return null;
+  const p = payload[0]?.payload || {};
+  return (
+    <div style={{
+      background: "#111827",
+      border: "1px solid #6366F1",
+      borderRadius: 8,
+      padding: "8px 10px",
+      fontSize: 12
+    }}>
+      <div style={{ color: "#C7D2FE", marginBottom: 6 }}>
+        {(p.name ?? "")} • {(p._model ?? "")}
+      </div>
+      <div>Risk (σ): <b>{Number(p.risk ?? 0).toFixed(1)}%</b></div>
+      <div>Expected Return: <b>{Number(p.ret ?? 0).toFixed(1)}%</b></div>
+    </div>
+  );
+}
 
 export default function Dashboard() {
   const dispatch = useDispatch();
@@ -66,9 +93,9 @@ export default function Dashboard() {
   const {
     dataset, riskLevel, options,
     initialEquity, timeHorizon, threshold,
+    maxAssets,
     activeTab,
-    // backend call state (used only to disable button while running)
-    optimizeStatus,
+    optimizeStatus, optimizeResult,
   } = useSelector((s) => s.ui);
 
   // Safe risk label
@@ -76,15 +103,18 @@ export default function Dashboard() {
   const riskPretty = safeRiskLevel.charAt(0).toUpperCase() + safeRiskLevel.slice(1);
 
   const [activeSlice, setActiveSlice] = useState(null);
+  const [compareLoading, setCompareLoading] = useState(false);
+const [accuracy, setAccuracy] = useState(null);
+const [riskReturn, setRiskReturn] = useState(null);
 
-  // Home constraints
-  const [sectorCaps, setSectorCaps] = useState({ Tech: 40, Finance: 35, Healthcare: 35, Energy: 25 });
-  const [turnoverCap, setTurnoverCap] = useState(20);
-  const [esgExclude, setEsgExclude] = useState(true);
-  const [useHybrid, setUseHybrid] = useState(true);
+// NEW: clicked point selection
+const [selectedAsset, setSelectedAsset] = useState(null);
 
-  // Section controls
+  // Section controls (kept for other pages)
   const [rebalanceFreq, setRebalanceFreq] = useState("Monthly"); // compare & evolution
+
+  // Demo-only inputs kept for charts (frontier/sharpe/stress)
+  const [useHybrid, setUseHybrid] = useState(true);
   const [stress, setStress] = useState({ ratesBps: 200, oilPct: 15, techPct: -8, fxPct: 3 });
 
   // Data
@@ -95,27 +125,21 @@ export default function Dashboard() {
   const [topBits, setTopBits] = useState([]);
   const [stressed, setStressed] = useState({ bars: [], ruinLine: 0 });
 
-  // Loading flags (for mock-ui)
+  // Loading flags (for demo endpoints)
   const [loading, setLoading] = useState({
     frontier: false, sharpe: false, qaoa: false, alloc: false, evo: false, stress: false
   });
 
-  // Constraints object
-  const constraints = useMemo(
-    () => ({ sectorCaps, turnoverCap, esgExclude }),
-    [sectorCaps, turnoverCap, esgExclude]
-  );
-
   // ---------- Effects ----------
-  // Initial load (mock-ui data)
+  // Initial load (demo endpoints for charts/sections)
   useEffect(() => {
     (async () => {
       try {
         setLoading((l) => ({ ...l, frontier: true, sharpe: true, qaoa: true, alloc: true, evo: true }));
         const [f, s, bits] = await Promise.all([
-          fetchEfficientFrontier({ riskLevel: safeRiskLevel, constraints, threshold }),
+          fetchEfficientFrontier({ riskLevel: safeRiskLevel, constraints: {}, threshold }),
           fetchSharpeComparison({}),
-          runQAOASelection({ constraints, threshold }),
+          runQAOASelection({ constraints: {}, threshold }),
         ]);
         setFrontier(f);
         setSharpeData(s);
@@ -141,12 +165,46 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Frontier updates (mock-ui)
+  useEffect(() => { setSelectedAsset(null); }, [riskReturn]);
+  useEffect(() => {
+  if (activeTab !== "compare") return;
+
+  (async () => {
+    try {
+      setCompareLoading(true);
+
+      const assetNames = Array.isArray(alloc) ? alloc.map(a => a?.name).filter(Boolean) : [];
+      const weights    = Array.isArray(alloc) ? alloc.map(a => Number(a?.value) || 0) : [];
+
+      const [accRes, rrRes] = await Promise.allSettled([
+        fetchCompareAccuracy({ risk: riskLevel }),
+        fetchCompareRiskReturn({ dataset, maxAssets, assetNames, weights }),
+      ]);
+
+      if (accRes.status === "fulfilled") setAccuracy(accRes.value);
+      if (rrRes.status === "fulfilled")  setRiskReturn(rrRes.value);
+
+      if (accRes.status === "rejected" || rrRes.status === "rejected") {
+        throw new Error("Compare data failed to load.");
+      }
+    } catch (e) {
+      console.error(e);
+      dispatch(addToast({ type: "error", msg: "Compare data failed to load." }));
+    } finally {
+      setCompareLoading(false);
+    }
+  })();
+  // include alloc so it refreshes when you re-run optimize
+}, [activeTab, riskLevel, dataset, maxAssets, alloc]);
+
+
+
+  // Frontier updates (demo)
   useEffect(() => {
     (async () => {
       try {
         setLoading((l) => ({ ...l, frontier: true }));
-        const f = await fetchEfficientFrontier({ riskLevel: safeRiskLevel, constraints, threshold });
+        const f = await fetchEfficientFrontier({ riskLevel: safeRiskLevel, constraints: {}, threshold });
         setFrontier(f);
       } catch (e) {
         console.error(e);
@@ -156,9 +214,9 @@ export default function Dashboard() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [safeRiskLevel, threshold, constraints]);
+  }, [safeRiskLevel, threshold]);
 
-  // Evolution updates (mock-ui)
+  // Evolution updates (demo)
   useEffect(() => {
     (async () => {
       try {
@@ -175,36 +233,7 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rebalanceFreq, useHybrid, initialEquity, timeHorizon]);
 
-  // Threshold → re-run QAOA + allocation + frontier (mock-ui)
-  useEffect(() => {
-    (async () => {
-      try {
-        setLoading((l) => ({ ...l, qaoa: true, alloc: true, frontier: true }));
-        const [bits, f] = await Promise.all([
-          runQAOASelection({ constraints, threshold }),
-          fetchEfficientFrontier({ riskLevel: safeRiskLevel, constraints, threshold }),
-        ]);
-        setTopBits(bits);
-
-        const newAlloc = await fetchAllocation({
-          topBits: bits[0]?.bits || "10101",
-          hybrid: useHybrid,
-          threshold,
-          dataset,
-        });
-        setAlloc(newAlloc);
-        setFrontier(f);
-      } catch (e) {
-        console.error(e);
-        dispatch(addToast({ type: "error", msg: "Failed to apply threshold." }));
-      } finally {
-        setLoading((l) => ({ ...l, qaoa: false, alloc: false, frontier: false }));
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threshold, useHybrid, constraints, safeRiskLevel]);
-
-  // Stress chart: recompute when shocks / threshold / equity / alloc change (mock-ui)
+  // Stress chart (demo)
   useEffect(() => {
     (async () => {
       try {
@@ -221,9 +250,10 @@ export default function Dashboard() {
         } else {
           setStressed({
             bars: Array.isArray(res?.bars) ? res.bars : [],
-            ruinLine: typeof res?.ruinLine === "number"
-              ? res.ruinLine
-              : (Number(threshold) / 100) * Number(initialEquity || 0),
+            ruinLine:
+              typeof res?.ruinLine === "number"
+                ? res.ruinLine
+                : (Number(threshold) / 100) * Number(initialEquity || 0),
           });
         }
       } catch (e) {
@@ -236,38 +266,41 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stress, threshold, initialEquity, alloc]);
 
-  // ---------- Single button handler (replaces Apply Constraints & Backend button on Home) ----------
+  // ---------- Map backend optimize → alloc (REAL FastAPI weights) ----------
+  useEffect(() => {
+    if (!optimizeResult) return;
+
+    // Prefer normalized shape from our Node backend
+    if (Array.isArray(optimizeResult.allocation) && optimizeResult.allocation.length) {
+      setAlloc(
+        optimizeResult.allocation.map((a) => ({
+          name: a.name,
+          value: Number(a.value) || 0, // already %
+        }))
+      );
+      return;
+    }
+
+    // Fallback if raw FastAPI JSON somehow reaches the frontend
+    if (Array.isArray(optimizeResult.portfolio) && optimizeResult.portfolio.length) {
+      setAlloc(
+        optimizeResult.portfolio.map((p) => ({
+          name: p.asset,
+          value: Math.round(
+            typeof p.percentage === "number" ? p.percentage : (Number(p.weight) || 0) * 100
+          ),
+        }))
+      );
+    }
+  }, [optimizeResult]);
+
+  // ---------- Backend optimize on click ----------
   async function handleRunQuantum() {
     try {
-      setLoading((l) => ({ ...l, qaoa: true, alloc: true, frontier: true }));
-
-      // Fire backend optimize silently (preps for FastAPI later)
-      try {
-        await dispatch(runOptimizeThunk()).unwrap();
-      } catch {
-        // ignore errors from backend thunk for Home flow; demo endpoints still render
-      }
-
-      // Do the SAME work Apply Constraints used to do (keeps UI identical)
-      const [bits, f] = await Promise.all([
-        runQAOASelection({ constraints, threshold }),
-        fetchEfficientFrontier({ riskLevel: safeRiskLevel, constraints, threshold }),
-      ]);
-      setTopBits(bits);
-
-      const newAlloc = await fetchAllocation({
-        topBits: bits[0]?.bits || "10101",
-        hybrid: useHybrid,
-        threshold,
-        dataset,
-      });
-      setAlloc(newAlloc);
-      setFrontier(f);
+      await dispatch(runOptimizeThunk()).unwrap();
+      // Success toast already from thunk; alloc now uses real FastAPI data via effect
     } catch (e) {
-      console.error(e);
-      dispatch(addToast({ type: "error", msg: "Failed to optimize. Try again." }));
-    } finally {
-      setLoading((l) => ({ ...l, qaoa: false, alloc: false, frontier: false }));
+      dispatch(addToast({ type: "error", msg: e?.message || "Failed to optimize. Try again." }));
     }
   }
 
@@ -279,106 +312,79 @@ export default function Dashboard() {
     dataset || "Select Dataset";
 
   const centerLabelText =
-    activeSlice === null ? "Weights (%)" : `${alloc[activeSlice]?.name ?? ""} · ${percent(alloc[activeSlice]?.value || 0, 0)}`;
+    activeSlice === null
+      ? "Weights (%)"
+      : `${alloc[activeSlice]?.name ?? ""} · ${percent(alloc[activeSlice]?.value || 0, 0)}`;
 
   const showSharpe = !options?.length || options.includes("Sharpe Ratio");
   const showStress = !options?.length || options.includes("Stress Testing");
   const showClassical = !options?.length || options.includes("Classical Comparison");
 
-  // ---------- Home (constraints + two-pane results) ----------
+  // ---------- Home (FastAPI-aligned inputs) ----------
   const renderHome = () => (
     <div className="max-w-7xl mx-auto px-5 py-6 md:py-8 space-y-6">
-      <Card title="Constraints">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Sector caps */}
-          <div className="lg:col-span-1">
-            <h3 className="text-sm font-medium text-zinc-300 mb-2">Sector Caps (%)</h3>
-            <div className="grid grid-cols-2 gap-4 text-sm">
-              {Object.keys(sectorCaps).map((k) => (
-                <div key={k}>
-                  <label className="block text-zinc-300 mb-1">{k}</label>
-                  <input
-                    type="number"
-                    className="w-full bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2"
-                    value={sectorCaps[k]}
-                    min={0}
-                    max={100}
-                    onChange={(e) => setSectorCaps({ ...sectorCaps, [k]: Number(e.target.value) })}
-                  />
-                </div>
-              ))}
-            </div>
+      <Card title="Optimization Inputs (FastAPI)">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 text-sm">
+          {/* Risk factor */}
+          <div className="space-y-2">
+            <label className="block text-zinc-300">Risk Factor</label>
+            <select
+              className="bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2 w-full"
+              value={riskLevel}
+              onChange={(e) => dispatch(setRiskLevel(e.target.value))}
+            >
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+            <div className="text-zinc-500">Maps to FastAPI <code>risk_factor</code></div>
           </div>
 
-          {/* ESG + Turnover + Hybrid */}
-          <div className="lg:col-span-1 space-y-4 text-sm">
-            <label className="inline-flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                className="accent-indigo-500 w-4 h-4"
-                checked={esgExclude}
-                onChange={(e) => setEsgExclude(e.target.checked)}
-              />
-              <span>Exclude non-ESG (e.g., oil/coal)</span>
-            </label>
-
-            <div>
-              <label className="block text-zinc-300 mb-1">Turnover Cap (%)</label>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                value={turnoverCap}
-                onChange={(e) => setTurnoverCap(Number(e.target.value))}
-                className="w-full accent-indigo-500"
-              />
-              <div className="text-zinc-400 mt-1">{turnoverCap}% max rebalance turnover</div>
-            </div>
-
-            <label className="inline-flex items-center gap-2 text-sm cursor-pointer select-none">
-              <input
-                type="checkbox"
-                className="accent-indigo-500 w-4 h-4"
-                checked={useHybrid}
-                onChange={(e) => setUseHybrid(e.target.checked)}
-              />
-              <span>Hybrid (QAOA + Weights): {useHybrid ? "Enabled" : "Disabled"}</span>
-            </label>
+          {/* Assets (budget = number of assets) */}
+          <div className="space-y-2">
+            <label className="block text-zinc-300">Assets</label>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              className="w-full bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2"
+              value={maxAssets}
+              onChange={(e) => dispatch(setMaxAssets(e.target.value))}
+            />
+            <div className="text-zinc-500">FastAPI <code>budget</code> (count of assets to select)</div>
           </div>
 
-          {/* Initial equity + Single Action */}
-          <div className="lg:col-span-1 space-y-4">
-            <div>
-              <label className="block text-zinc-300 mb-1">Initial Equity (₹)</label>
-              <input
-                type="number"
-                min={0}
-                step={1000}
-                value={initialEquity}
-                onChange={(e) => dispatch(setInitialEquity(Number(e.target.value) || 0))}
-                className="w-full bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2"
-              />
-            </div>
+          {/* Total investment */}
+          <div className="space-y-2">
+            <label className="block text-zinc-300">Total Investment (₹)</label>
+            <input
+              type="number"
+              min={0}
+              step={1000}
+              className="w-full bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2"
+              value={initialEquity}
+              onChange={(e) => dispatch(setInitialEquity(Number(e.target.value) || 0))}
+            />
+            <div className="text-zinc-500">FastAPI <code>total_investment</code></div>
+          </div>
 
-            <div className="flex flex-col sm:flex-row gap-2">
-              <button
-                onClick={handleRunQuantum}
-                className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm disabled:opacity-60"
-                disabled={loading.qaoa || loading.alloc || loading.frontier || optimizeStatus === "loading"}
-                title="Runs the full optimization flow"
-              >
-                {(loading.qaoa || loading.alloc || loading.frontier || optimizeStatus === "loading")
-                  ? "Optimizing..."
-                  : "Run Quantum Optimize"}
-              </button>
-            </div>
+          {/* Single action */}
+          <div className="lg:col-span-3">
+            <button
+              onClick={handleRunQuantum}
+              className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm disabled:opacity-60"
+              disabled={optimizeStatus === "loading"}
+              title="Calls backend /api/optimize (FastAPI live or mock)"
+            >
+              {optimizeStatus === "loading" ? "Optimizing..." : "Run Quantum Optimize"}
+            </button>
           </div>
         </div>
       </Card>
 
       {/* Two-pane results */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card title="Chosen Companies (by Constraints / Backend)">
+        <Card title="Chosen Companies (Quantum FastAPI)">
           {!alloc?.length ? (
             <EmptyState title="No allocation yet" subtitle="Click Run Quantum Optimize." />
           ) : (
@@ -447,7 +453,11 @@ export default function Dashboard() {
                       />
                     ))}
                     <Label
-                      value={activeSlice === null ? "Weights (%)" : `${alloc[activeSlice]?.name ?? ""} · ${percent(alloc[activeSlice]?.value || 0, 0)}`}
+                      value={
+                        activeSlice === null
+                          ? "Weights (%)"
+                          : `${alloc[activeSlice]?.name ?? ""} · ${percent(alloc[activeSlice]?.value || 0, 0)}`
+                      }
                       position="center"
                       fill="#e5e7eb"
                       fontSize={12}
@@ -467,10 +477,9 @@ export default function Dashboard() {
           </p>
           <p className="mb-0">
             Current setup — Dataset: <span className="text-zinc-100">{datasetLabel}</span>, Risk:
-            <span className="text-zinc-100"> {riskPretty}</span>, Initial Equity:
-            <span className="text-zinc-100"> {`₹${initialEquity.toLocaleString("en-IN")}`}</span>, Horizon:
-            <span className="text-zinc-100"> {timeHorizon} days</span>, Threshold:
-            <span className="text-zinc-100"> {threshold}%</span>.
+            <span className="text-zinc-100"> {riskPretty}</span>, Assets:
+            <span className="text-zinc-100"> {maxAssets}</span>, Total Investment:
+            <span className="text-zinc-100"> {`₹${initialEquity.toLocaleString("en-IN")}`}</span>.
           </p>
         </div>
       </Card>
@@ -487,7 +496,7 @@ export default function Dashboard() {
         {activeTab === null ? (
           <div className="flex-1 overflow-auto">{renderHome()}</div>
         ) : (
-          // Section pages
+          // Section pages (kept demo for now)
           <div className="flex-1 overflow-auto">
             <div className="max-w-7xl mx-auto px-5 py-6 md:py-8 space-y-6">
               {/* Section header */}
@@ -502,180 +511,155 @@ export default function Dashboard() {
                 <p className="text-zinc-400 text-sm mt-1">
                   Dataset: <span className="text-zinc-200">{datasetLabel}</span>
                   {" • "}Risk: <span className="text-zinc-200">{riskPretty}</span>
-                  {" • "}Hybrid: <span className="text-zinc-200">{useHybrid ? "On" : "Off"}</span>
+                  {" • "}Assets: <span className="text-zinc-200">{maxAssets}</span>
                   {" • "}Init: <span className="text-zinc-200">{`₹${initialEquity.toLocaleString("en-IN")}`}</span>
                   {" • "}Horizon: <span className="text-zinc-200">{timeHorizon} days</span>
                   {" • "}Thresh: <span className="text-zinc-200">{threshold}%</span>
                 </p>
               </div>
 
-              {/* Section bodies (unchanged) */}
+              {/* Compare (demo behavior retained for now) */}
               {activeTab === "compare" && (
-                <>
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                    <Card title="Time (days)">
-                      <input
-                        type="number"
-                        min={1}
-                        className="w-full bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2"
-                        value={timeHorizon}
-                        onChange={(e) => dispatch(setTimeHorizon(Number(e.target.value) || 1))}
-                      />
-                    </Card>
-                    <Card title="Rebalancing">
-                      <select
-                        className="bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2 w-full"
-                        value={rebalanceFreq}
-                        onChange={(e) => setRebalanceFreq(e.target.value)}
-                      >
-                        <option>Monthly</option>
-                        <option>Quarterly</option>
-                      </select>
-                    </Card>
-                    <Card title="Hybrid (QAOA + Weights)">
-                      <label className="inline-flex items-center gap-2 text-sm cursor-pointer select-none">
-                        <input
-                          type="checkbox"
-                          className="accent-indigo-500 w-4 h-4"
-                          checked={useHybrid}
-                          onChange={(e) => setUseHybrid(e.target.checked)}
-                        />
-                        <span>{useHybrid ? "Enabled" : "Disabled"}</span>
-                      </label>
-                    </Card>
-                    <Card title="Actions">
-                      <button
-                        onClick={handleRunQuantum}
-                        className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm disabled:opacity-60"
-                        disabled={loading.qaoa || loading.alloc || loading.frontier || optimizeStatus === "loading"}
-                      >
-                        {(loading.qaoa || loading.alloc || loading.frontier || optimizeStatus === "loading")
-                          ? "Optimizing..."
-                          : "Run Quantum Optimize"}
-                      </button>
-                    </Card>
-                  </div>
+  <>
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      {/* Accuracy bar */}
+      <Card title="Model Accuracy (Demo)">
+        <div className="h-[280px]">
+          {compareLoading ? (
+            <Skeleton className="h-full w-full" />
+          ) : !accuracy ? (
+            <EmptyState title="No data" subtitle="Open this tab to fetch results." />
+          ) : (
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart
+                data={[
+                  { name: "Classical", value: accuracy.classical },
+                  { name: "Quantum",   value: accuracy.quantum   },
+                ]}
+                margin={{ top: 10, right: 15, left: 10, bottom: 24 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.15} />
+                <XAxis dataKey="name" stroke="#a1a1aa" tickMargin={6} />
+                <YAxis stroke="#a1a1aa" domain={[0, 100]} width={56} />
+                <Tooltip
+                  contentStyle={tooltipStyles.contentStyle}
+                  labelStyle={tooltipStyles.labelStyle}
+                  itemStyle={tooltipStyles.itemStyle}
+                  wrapperStyle={tooltipStyles.wrapperStyle}
+                  formatter={(v) => `${v}%`}
+                />
+                <Bar dataKey="value" radius={[8, 8, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+        <ChartCaption x="Model" y="Accuracy (%)" />
+      </Card>
 
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {/* Efficient Frontier */}
-                    <Card title="Efficient Frontier">
-                      <div className="h-[280px]">
-                        {loading.frontier ? (
-                          <Skeleton className="h-full w-full" />
-                        ) : !frontier?.length ? (
-                          <EmptyState title="No frontier yet" subtitle="Click Run Quantum Optimize." />
-                        ) : (
-                          <ResponsiveContainer width="100%" height="100%">
-                            <LineChart data={frontier} margin={{ top: 10, right: 15, left: 16, bottom: 8 }}>
-                              <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.15} />
-                              <XAxis dataKey="risk" stroke="#a1a1aa" tickMargin={6} />
-                              <YAxis stroke="#a1a1aa" tickFormatter={(v) => `${Number(v).toFixed(1)}%`} tickMargin={6} width={64} />
-                              <Tooltip
-                                formatter={(v, n) => (n === "return" ? `${Number(v).toFixed(2)}%` : v)}
-                                labelFormatter={(lab) => `Risk (σ): ${lab}`}
-                                contentStyle={tooltipStyles.contentStyle}
-                                labelStyle={tooltipStyles.labelStyle}
-                                itemStyle={tooltipStyles.itemStyle}
-                                wrapperStyle={tooltipStyles.wrapperStyle}
-                              />
-                              <Line type="monotone" dataKey="return" stroke="#7C3AED" strokeWidth={2} dot={{ r: 4 }} />
-                            </LineChart>
-                          </ResponsiveContainer>
-                        )}
-                      </div>
-                      <ChartCaption x="Portfolio Risk (σ)" y="Expected Return (%)" />
-                    </Card>
+      {/* Risk vs Return scatter */}
+<Card title="Risk vs Return per Asset">
+  <div className="h-[320px]">
+    {compareLoading ? (
+      <Skeleton className="h-full w-full" />
+    ) : !riskReturn?.points?.length ? (
+      <EmptyState title="No data" subtitle="Open this tab to fetch results." />
+    ) : (
+      <>
+        <ResponsiveContainer width="100%" height="100%">
+          <ScatterChart margin={{ top: 10, right: 16, left: 12, bottom: 28 }}>
+            <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.15} />
+            <XAxis
+              type="number"
+              dataKey="risk"
+              name="Risk (σ)"
+              unit="%"
+              stroke="#a1a1aa"
+              tickMargin={6}
+            />
+            <YAxis
+              type="number"
+              dataKey="ret"
+              name="Expected Return"
+              unit="%"
+              stroke="#a1a1aa"
+              tickMargin={6}
+              width={64}
+            />
 
-                    {/* Sharpe Ratio */}
-                    {showSharpe && (
-                      <Card title="Sharpe Ratio Comparison">
-                        <div className="h-[280px]">
-                          {loading.sharpe ? (
-                            <Skeleton className="h-full w-full" />
-                          ) : !sharpeData?.length ? (
-                            <EmptyState title="No Sharpe data" subtitle="Run optimization." />
-                          ) : (
-                            <ResponsiveContainer width="100%" height="100%">
-                              <BarChart data={sharpeData} margin={{ top: 10, right: 15, left: 10, bottom: 24 }}>
-                                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.15} />
-                                <XAxis dataKey="name" stroke="#a1a1aa" tickMargin={6} />
-                                <YAxis stroke="#a1a1aa" domain={[0, "dataMax + 0.2"]} width={56} />
-                                <Tooltip
-                                  contentStyle={tooltipStyles.contentStyle}
-                                  labelStyle={tooltipStyles.labelStyle}
-                                  itemStyle={tooltipStyles.itemStyle}
-                                  wrapperStyle={tooltipStyles.wrapperStyle}
-                                />
-                                <Bar dataKey="value" fill="#8B5CF6" radius={[8, 8, 0, 0]} />
-                              </BarChart>
-                            </ResponsiveContainer>
-                          )}
-                        </div>
-                        <ChartCaption x="Model" y="Sharpe Ratio" />
-                      </Card>
-                    )}
+            {/* Clean tooltip: company + model + risk + return */}
+            <Tooltip content={<CompareTooltip />} cursor={{ strokeDasharray: "3 3" }} />
+            <Legend />
 
-                    {/* Allocation */}
-                    <Card title="Portfolio Allocation (Weights)">
-                      <div className="h-[280px]">
-                        {loading.alloc ? (
-                          <Skeleton className="h-full w-full" />
-                        ) : !alloc?.length ? (
-                          <EmptyState title="No allocation yet" subtitle="Click Run Quantum Optimize." />
-                        ) : (
-                          <ResponsiveContainer width="100%" height="100%">
-                            <PieChart margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
-                              <Tooltip
-                                formatter={(v) => `${Number(v).toFixed(0)}%`}
-                                contentStyle={tooltipStyles.contentStyle}
-                                labelStyle={tooltipStyles.labelStyle}
-                                itemStyle={tooltipStyles.itemStyle}
-                                wrapperStyle={tooltipStyles.wrapperStyle}
-                              />
-                              <Legend
-                                verticalAlign="bottom"
-                                height={28}
-                                wrapperStyle={{ color: "#a1a1aa", fontSize: 12 }}
-                                iconSize={8}
-                              />
-                              <Pie
-                                data={alloc}
-                                dataKey="value"
-                                nameKey="name"
-                                cx="50%"
-                                cy="50%"
-                                innerRadius={60}
-                                outerRadius={activeSlice === null ? 92 : 96}
-                                paddingAngle={1}
-                                isAnimationActive={false}
-                                onMouseEnter={(_, i) => setActiveSlice(i)}
-                                onMouseLeave={() => setActiveSlice(null)}
-                                onTouchStart={(_, i) => setActiveSlice(i)}
-                                onTouchEnd={() => setActiveSlice(null)}
-                                label={false}
-                              >
-                                {alloc.map((_, i) => (
-                                  <Cell
-                                    key={i}
-                                    fill={COLORS[i % COLORS.length]}
-                                    fillOpacity={activeSlice === null ? 1 : activeSlice === i ? 1 : 0.95}
-                                    stroke="#e5e7eb33"
-                                    strokeWidth={activeSlice === i ? 2 : 1}
-                                    style={{ transition: "all 120ms ease" }}
-                                  />
-                                ))}
-                                <Label value={centerLabelText} position="center" fill="#e5e7eb" fontSize={12} />
-                              </Pie>
-                            </PieChart>
-                          </ResponsiveContainer>
-                        )}
-                      </div>
-                    </Card>
+            {/* Classical series (blue) */}
+            <Scatter
+              name="Classical"
+              data={riskReturn.points.map(p => ({
+                name: p.name,
+                risk: p.classical.risk,
+                ret: p.classical.ret,
+                _model: "Classical",
+              }))}
+              fill="#60a5fa"
+              shape="circle"
+              onClick={(pt) => setSelectedAsset(pt?.name || null)}
+            />
 
-                    {/* (Intentionally no evolution chart here) */}
-                  </div>
-                </>
-              )}
+            {/* Quantum series (violet) */}
+            <Scatter
+              name="Quantum"
+              data={riskReturn.points.map(p => ({
+                name: p.name,
+                risk: p.quantum.risk,
+                ret: p.quantum.ret,
+                _model: "Quantum",
+              }))}
+              fill="#a78bfa"
+              shape="circle"
+              onClick={(pt) => setSelectedAsset(pt?.name || null)}
+            />
+          </ScatterChart>
+        </ResponsiveContainer>
+
+        {/* Clicked-point details */}
+        {selectedAsset && (() => {
+          const row = riskReturn.points.find(p => p.name === selectedAsset);
+          if (!row) return null;
+          return (
+            <div className="mt-3 text-sm border border-zinc-800/60 rounded-xl p-3 bg-[#0f1422]">
+              <div className="mb-2 font-medium">
+                {row.name} — details
+                <button
+                  className="ml-2 px-2 py-0.5 text-xs rounded bg-zinc-800 hover:bg-zinc-700"
+                  onClick={() => setSelectedAsset(null)}
+                >
+                  clear
+                </button>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="border border-zinc-800/50 rounded-lg p-2">
+                  <div className="text-zinc-400 mb-1">Classical</div>
+                  <div>Risk (σ): <span className="text-zinc-100">{row.classical.risk.toFixed(1)}%</span></div>
+                  <div>Return: <span className="text-zinc-100">{row.classical.ret.toFixed(1)}%</span></div>
+                </div>
+                <div className="border border-emerald-800/40 rounded-lg p-2">
+                  <div className="text-zinc-400 mb-1">Quantum</div>
+                  <div>Risk (σ): <span className="text-zinc-100">{row.quantum.risk.toFixed(1)}%</span></div>
+                  <div>Return: <span className="text-zinc-100">{row.quantum.ret.toFixed(1)}%</span></div>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+      </>
+    )}
+  </div>
+  <ChartCaption x="Risk (σ, %)" y="Expected Return (%)" />
+</Card>
+
+    </div>
+  </>
+)}
+
 
               {activeTab === "evolution" && (
                 <>
@@ -874,7 +858,7 @@ export default function Dashboard() {
               {activeTab === "explain" && (
                 <Card title="Top Measured Portfolios (Demo)">
                   {!topBits?.length ? (
-                    <EmptyState title="No solutions yet" subtitle="Click Run Quantum Optimize." />
+                    <EmptyState title="No solutions yet" subtitle="Apply constraints to compute candidate bitstrings." />
                   ) : (
                     <div className="overflow-auto border border-zinc-800/70 rounded-xl">
                       <table className="w-full text-sm">
