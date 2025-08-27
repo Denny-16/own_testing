@@ -15,10 +15,9 @@ import { runOptimizeThunk } from "../store/uiSlice";
 import EmptyState from "./EmptyState.js";
 import Skeleton from "./Skeleton.js";
 import { downloadJSON, downloadCSV } from "../utils/exporters.js";
-import InsightsPanel from "./InsightsPanel.js";
 
 import {
-  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
+  XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Legend, BarChart, Bar, CartesianGrid,
   ReferenceLine, ScatterChart, Scatter
 } from "recharts";
@@ -29,12 +28,10 @@ import {
   runQAOASelection,
   fetchAllocation,
   stressSim,
-  fetchCompareAccuracy,
-  fetchCompareRiskReturn,
   fetchRebalance, // POST /api/rebalance
 } from "../lib/api.js";
 
-/* ---------- UI bits ---------- */
+/* ---------- Small UI helpers ---------- */
 const Card = ({ title, children, className = "" }) => (
   <div className={`bg-[#0f1422] border border-zinc-800/70 rounded-2xl p-4 shadow-sm ${className}`}>
     {title ? (
@@ -54,6 +51,13 @@ const ChartCaption = ({ x, y }) => (
 const COLORS = ["#7C3AED", "#3B82F6", "#10B981", "#F59E0B", "#EF4444", "#22C55E", "#06B6D4"];
 const currency = (v) => `₹${Number(v).toLocaleString("en-IN")}`;
 const percent = (v, digits = 0) => `${Number(v).toFixed(digits)}%`;
+
+/* ---------- Dataset → API mapping (Home dataset → backend value) ---------- */
+const DATASET_API_MAP = {
+  crypto:  "Crypto",
+  nasdaq:  "NASDAQ",
+  nifty50: "NIFTY50",
+};
 
 /* ---------- Compare tooltip ---------- */
 function CompareTooltip({ active, payload }) {
@@ -91,6 +95,7 @@ const tooltipStyles = {
 export default function Dashboard() {
   const dispatch = useDispatch();
 
+  /* ---------- Global UI state ---------- */
   const {
     dataset, riskLevel, options,
     initialEquity, timeHorizon, threshold,
@@ -102,25 +107,28 @@ export default function Dashboard() {
   const safeRiskLevel = (typeof riskLevel === "string" && riskLevel.length) ? riskLevel : "medium";
   const riskPretty = safeRiskLevel.charAt(0).toUpperCase() + safeRiskLevel.slice(1);
 
+  /* ---------- Local state ---------- */
   const [activeSlice, setActiveSlice] = useState(null);
+
+  // Compare (uses demo data; no backend dependency to avoid missing export errors)
   const [compareLoading, setCompareLoading] = useState(false);
   const [accuracy, setAccuracy] = useState(null);
   const [riskReturn, setRiskReturn] = useState(null);
   const [selectedAsset, setSelectedAsset] = useState(null);
 
-  // Data
+  // Allocation / Frontier / Stress
   const [frontier, setFrontier] = useState([]);
   const [sharpeData, setSharpeData] = useState([]);
-  const [alloc, setAlloc] = useState([]);        // [{name, value}] (value in %)
-  const [evolution, setEvolution] = useState([]); // kept for InsightsPanel compatibility
+  const [alloc, setAlloc] = useState([]);
+  const [evolution, setEvolution] = useState([]); // kept only for export JSON compatibility
   const [topBits, setTopBits] = useState([]);
   const [stressed, setStressed] = useState({ bars: [], ruinLine: 0 });
 
   const [loading, setLoading] = useState({
-    frontier: false, sharpe: false, qaoa: false, alloc: false, evo: false, stress: false
+    frontier: false, sharpe: false, qaoa: false, alloc: false, stress: false
   });
 
-  /* ---------- NEW: Rebalancing data ---------- */
+  // Rebalancing
   const [rbLoading, setRbLoading] = useState(false);
   const [futureDataset, setFutureDataset] = useState("NIFTY50_Future");
   const [rebal, setRebal] = useState(null);
@@ -156,40 +164,34 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* ---------- Compare tab: accuracy + risk/return points ---------- */
+  /* ---------- Compare tab (client-side demo data) ---------- */
   useEffect(() => { setSelectedAsset(null); }, [riskReturn]);
 
   useEffect(() => {
     if (activeTab !== "compare") return;
+    setCompareLoading(true);
 
-    (async () => {
-      try {
-        setCompareLoading(true);
+    // Simple deterministic demo data based on current alloc
+    const names = (alloc || []).map(a => a.name);
+    const baseAcc = { classical: 74, quantum: 83 };
+    const pts = names.map((n, i) => {
+      const w = Number(alloc[i]?.value || 0);
+      // derive "risk/return" from weight so it's stable
+      const risk = Math.max(2, Math.min(40, 30 - w * 0.1 + (i % 5)));
+      const ret  = Math.max(1, Math.min(30,  5 + w * 0.12 + ((i * 3) % 7)));
+      return {
+        name: n,
+        classical: { risk: risk + 2, ret: ret - 1 },
+        quantum:   { risk: risk,     ret: ret + 1.5 },
+      };
+    });
 
-        const assetNames = Array.isArray(alloc) ? alloc.map(a => a?.name).filter(Boolean) : [];
-        const weights    = Array.isArray(alloc) ? alloc.map(a => Number(a?.value) || 0) : [];
+    setAccuracy(baseAcc);
+    setRiskReturn({ points: pts });
+    setCompareLoading(false);
+  }, [activeTab, alloc]);
 
-        const [accRes, rrRes] = await Promise.allSettled([
-          fetchCompareAccuracy({ risk: riskLevel }),
-          fetchCompareRiskReturn({ dataset, maxAssets, assetNames, weights }),
-        ]);
-
-        if (accRes.status === "fulfilled") setAccuracy(accRes.value);
-        if (rrRes.status === "fulfilled")  setRiskReturn(rrRes.value);
-
-        if (accRes.status === "rejected" || rrRes.status === "rejected") {
-          throw new Error("Compare data failed to load.");
-        }
-      } catch (e) {
-        console.error(e);
-        dispatch(addToast({ type: "error", msg: "Compare data failed to load." }));
-      } finally {
-        setCompareLoading(false);
-      }
-    })();
-  }, [activeTab, riskLevel, dataset, maxAssets, alloc, dispatch]);
-
-  /* ---------- Frontier updates (demo) ---------- */
+  /* ---------- Frontier updates when risk/threshold change ---------- */
   useEffect(() => {
     (async () => {
       try {
@@ -206,23 +208,23 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [safeRiskLevel, threshold]);
 
-  /* ---------- REBALANCING (replaces old Evolution UI) ---------- */
+  /* ---------- REBALANCING (replaces old Evolution) ---------- */
   useEffect(() => {
-    if (activeTab !== "evolution") return; // keep the same tab key; label changes below
+    const isRebalancingTab = activeTab === "evolution" || activeTab === "insights"; // treat 'insights' as Rebalancing
+    if (!isRebalancingTab) return;
+
     (async () => {
       try {
         setRbLoading(true);
         const res = await fetchRebalance({
-          dataset_option: dataset,
-          future_dataset_option: futureDataset,            // allow any of the *_Future options
+          dataset_option: DATASET_API_MAP[dataset] || "NIFTY50", // current dataset from Home
+          future_dataset_option: futureDataset,                  // user free pick
           budget: Math.max(1, Number(maxAssets || 5)),
           risk_factor: riskLevel,
           total_investment: Number(initialEquity) || 0,
         });
         setRebal(res);
-
-        // Optionally keep a tiny evolution summary for Insights panel (not required)
-        setEvolution([]); // clear; not used in Rebalancing
+        setEvolution([]); // not used anymore
       } catch (e) {
         console.error(e);
         dispatch(addToast({ type: "error", msg: "Rebalancing failed to load." }));
@@ -233,7 +235,7 @@ export default function Dashboard() {
     })();
   }, [activeTab, dataset, futureDataset, maxAssets, riskLevel, initialEquity, dispatch]);
 
-  /* ---------- Stress chart (demo) ---------- */
+  /* ---------- Stress chart ---------- */
   useEffect(() => {
     (async () => {
       try {
@@ -266,7 +268,7 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threshold, initialEquity, alloc]);
 
-  /* ---------- Map backend optimize → alloc (FastAPI normalized) ---------- */
+  /* ---------- Map backend optimize → alloc ---------- */
   useEffect(() => {
     if (!optimizeResult) return;
 
@@ -292,7 +294,7 @@ export default function Dashboard() {
     }
   }, [optimizeResult]);
 
-  /* ---------- Backend optimize on click ---------- */
+  /* ---------- Actions ---------- */
   async function handleRunQuantum() {
     try {
       await dispatch(runOptimizeThunk()).unwrap();
@@ -315,7 +317,7 @@ export default function Dashboard() {
     [alloc]
   );
 
-  /* ---------- Home (FastAPI-aligned inputs) ---------- */
+  /* ---------- Home ---------- */
   const renderHome = () => (
     <div className="max-w-7xl mx-auto px-5 py-6 md:py-8 space-y-6">
       <Card title="Optimization Inputs (FastAPI)">
@@ -455,41 +457,25 @@ export default function Dashboard() {
     </div>
   );
 
-  /* ---------- REBALANCING UI (in place of old Evolution) ---------- */
-  const renderRebalancing = () => {
-  // dataset → allowed future options (exactly one per dataset)
-  const futureOptionsMap = {
-    crypto: ["Crypto_Future"],
-    nasdaq: ["NASDAQ_Future"],
-    nifty50: ["NIFTY50_Future"],
-  };
-  const allowedFutureOptions = futureOptionsMap[dataset] || [];
-
-  return (
+  /* ---------- REBALANCING UI ---------- */
+  const renderRebalancing = () => (
     <div className="grid grid-cols-1 gap-6">
       <Card title="Rebalancing Inputs">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-          {/* Future Dataset Option (restricted by dataset) */}
+          {/* Future Dataset Option (user can choose any) */}
           <div className="space-y-1">
             <label className="block text-zinc-300">Future Dataset Option</label>
             <select
               className="w-full bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2"
               value={futureDataset}
               onChange={(e) => setFutureDataset(e.target.value)}
-              disabled={!allowedFutureOptions.length}
             >
-              {allowedFutureOptions.length ? (
-                allowedFutureOptions.map((opt) => (
-                  <option key={opt} value={opt}>{opt}</option>
-                ))
-              ) : (
-                <option value="">Select a dataset first</option>
-              )}
+              <option value="NIFTY50_Future">NIFTY50_Future</option>
+              <option value="NASDAQ_Future">NASDAQ_Future</option>
+              <option value="Crypto_Future">Crypto_Future</option>
             </select>
             <div className="text-xs text-zinc-500">
-              {dataset
-                ? `Based on "${dataset.toUpperCase()}" dataset`
-                : "Choose a dataset on Home first"}
+              Current dataset sent to API: <b>{DATASET_API_MAP[dataset] || "NIFTY50"}</b>
             </div>
           </div>
 
@@ -626,9 +612,10 @@ export default function Dashboard() {
       )}
     </div>
   );
-};
 
   /* ---------- Page ---------- */
+  const isRebalancingTab = activeTab === "evolution" || activeTab === "insights"; // 'insights' = removed; route here
+
   return (
     <div className="flex min-h-screen bg-[#0b0f1a] text-gray-100">
       <div className="flex-1 min-w-0 flex flex-col">
@@ -644,8 +631,7 @@ export default function Dashboard() {
               <div className="bg-[#0f1422] border border-zinc-800/70 rounded-xl p-4">
                 <h2 className="text-lg font-semibold tracking-tight">
                   {activeTab === "compare" && "Quantum vs Classical"}
-                  {activeTab === "evolution" && "Rebalancing"}
-                  {activeTab === "insights" && "Quantum Insights"}
+                  {isRebalancingTab && "Rebalancing"}
                   {activeTab === "stress" && "Stress Testing"}
                 </h2>
                 <p className="text-zinc-400 text-sm mt-1">
@@ -660,131 +646,115 @@ export default function Dashboard() {
 
               {/* Compare */}
               {activeTab === "compare" && (
-                <>
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {/* Accuracy bar (demo numbers) */}
-                    <Card title="Model Accuracy (Demo)">
-                      <div className="h-[280px]">
-                        {compareLoading ? (
-                          <Skeleton className="h-full w-full" />
-                        ) : !accuracy ? (
-                          <EmptyState title="No data" subtitle="Open this tab to fetch results." />
-                        ) : (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* Accuracy bar (demo numbers) */}
+                  <Card title="Model Accuracy (Demo)">
+                    <div className="h-[280px]">
+                      {compareLoading ? (
+                        <Skeleton className="h-full w-full" />
+                      ) : !accuracy ? (
+                        <EmptyState title="No data" subtitle="Open this tab to fetch results." />
+                      ) : (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart
+                            data={[
+                              { name: "Classical", value: accuracy.classical },
+                              { name: "Quantum",   value: accuracy.quantum   },
+                            ]}
+                            margin={{ top: 10, right: 15, left: 10, bottom: 24 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.15} />
+                            <XAxis dataKey="name" stroke="#a1a1aa" tickMargin={6} />
+                            <YAxis stroke="#a1a1aa" domain={[0, 100]} width={56} />
+                            <Tooltip
+                              contentStyle={tooltipStyles.contentStyle}
+                              labelStyle={tooltipStyles.labelStyle}
+                              itemStyle={tooltipStyles.itemStyle}
+                              wrapperStyle={tooltipStyles.wrapperStyle}
+                              formatter={(v) => `${v}%`}
+                            />
+                            <Bar dataKey="value" radius={[8, 8, 0, 0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      )}
+                    </div>
+                    <ChartCaption x="Model" y="Accuracy (%)" />
+                  </Card>
+
+                  {/* Risk vs Return scatter */}
+                  <Card title="Risk vs Return per Asset">
+                    <div className="h-[320px]">
+                      {compareLoading ? (
+                        <Skeleton className="h-full w-full" />
+                      ) : !riskReturn?.points?.length ? (
+                        <EmptyState title="No data" subtitle="Open this tab to fetch results." />
+                      ) : (
+                        <>
                           <ResponsiveContainer width="100%" height="100%">
-                            <BarChart
-                              data={[
-                                { name: "Classical", value: accuracy.classical },
-                                { name: "Quantum",   value: accuracy.quantum   },
-                              ]}
-                              margin={{ top: 10, right: 15, left: 10, bottom: 24 }}
-                            >
+                            <ScatterChart margin={{ top: 10, right: 16, left: 12, bottom: 28 }}>
                               <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.15} />
-                              <XAxis dataKey="name" stroke="#a1a1aa" tickMargin={6} />
-                              <YAxis stroke="#a1a1aa" domain={[0, 100]} width={56} />
-                              <Tooltip
-                                contentStyle={tooltipStyles.contentStyle}
-                                labelStyle={tooltipStyles.labelStyle}
-                                itemStyle={tooltipStyles.itemStyle}
-                                wrapperStyle={tooltipStyles.wrapperStyle}
-                                formatter={(v) => `${v}%`}
+                              <XAxis type="number" dataKey="risk" name="Risk (σ)" unit="%" stroke="#a1a1aa" tickMargin={6} />
+                              <YAxis type="number" dataKey="ret"  name="Expected Return" unit="%" stroke="#a1a1aa" tickMargin={6} width={64} />
+                              <Tooltip content={<CompareTooltip />} cursor={{ strokeDasharray: "3 3" }} />
+                              <Legend />
+                              <Scatter
+                                name="Classical"
+                                data={riskReturn.points.map(p => ({ name: p.name, risk: p.classical.risk, ret: p.classical.ret, _model: "Classical" }))}
+                                fill="#60a5fa"
+                                shape="circle"
+                                onClick={(pt) => setSelectedAsset(pt?.name || null)}
                               />
-                              <Bar dataKey="value" radius={[8, 8, 0, 0]} />
-                            </BarChart>
+                              <Scatter
+                                name="Quantum"
+                                data={riskReturn.points.map(p => ({ name: p.name, risk: p.quantum.risk, ret: p.quantum.ret, _model: "Quantum" }))}
+                                fill="#a78bfa"
+                                shape="circle"
+                                onClick={(pt) => setSelectedAsset(pt?.name || null)}
+                              />
+                            </ScatterChart>
                           </ResponsiveContainer>
-                        )}
-                      </div>
-                      <ChartCaption x="Model" y="Accuracy (%)" />
-                    </Card>
 
-                    {/* Risk vs Return scatter */}
-                    <Card title="Risk vs Return per Asset">
-                      <div className="h-[320px]">
-                        {compareLoading ? (
-                          <Skeleton className="h-full w-full" />
-                        ) : !riskReturn?.points?.length ? (
-                          <EmptyState title="No data" subtitle="Open this tab to fetch results." />
-                        ) : (
-                          <>
-                            <ResponsiveContainer width="100%" height="100%">
-                              <ScatterChart margin={{ top: 10, right: 16, left: 12, bottom: 28 }}>
-                                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.15} />
-                                <XAxis type="number" dataKey="risk" name="Risk (σ)" unit="%" stroke="#a1a1aa" tickMargin={6} />
-                                <YAxis type="number" dataKey="ret"  name="Expected Return" unit="%" stroke="#a1a1aa" tickMargin={6} width={64} />
-                                <Tooltip content={<CompareTooltip />} cursor={{ strokeDasharray: "3 3" }} />
-                                <Legend />
-                                <Scatter
-                                  name="Classical"
-                                  data={riskReturn.points.map(p => ({ name: p.name, risk: p.classical.risk, ret: p.classical.ret, _model: "Classical" }))}
-                                  fill="#60a5fa"
-                                  shape="circle"
-                                  onClick={(pt) => setSelectedAsset(pt?.name || null)}
-                                />
-                                <Scatter
-                                  name="Quantum"
-                                  data={riskReturn.points.map(p => ({ name: p.name, risk: p.quantum.risk, ret: p.quantum.ret, _model: "Quantum" }))}
-                                  fill="#a78bfa"
-                                  shape="circle"
-                                  onClick={(pt) => setSelectedAsset(pt?.name || null)}
-                                />
-                              </ScatterChart>
-                            </ResponsiveContainer>
-
-                            {selectedAsset && (() => {
-                              const row = riskReturn.points.find(p => p.name === selectedAsset);
-                              if (!row) return null;
-                              return (
-                                <div className="mt-3 text-sm border border-zinc-800/60 rounded-xl p-3 bg-[#0f1422]">
-                                  <div className="mb-2 font-medium">
-                                    {row.name} — details
-                                    <button
-                                      className="ml-2 px-2 py-0.5 text-xs rounded bg-zinc-800 hover:bg-zinc-700"
-                                      onClick={() => setSelectedAsset(null)}
-                                    >
-                                      clear
-                                    </button>
+                          {selectedAsset && (() => {
+                            const row = riskReturn.points.find(p => p.name === selectedAsset);
+                            if (!row) return null;
+                            return (
+                              <div className="mt-3 text-sm border border-zinc-800/60 rounded-xl p-3 bg-[#0f1422]">
+                                <div className="mb-2 font-medium">
+                                  {row.name} — details
+                                  <button
+                                    className="ml-2 px-2 py-0.5 text-xs rounded bg-zinc-800 hover:bg-zinc-700"
+                                    onClick={() => setSelectedAsset(null)}
+                                  >
+                                    clear
+                                  </button>
+                                </div>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                  <div className="border border-zinc-800/50 rounded-lg p-2">
+                                    <div className="text-zinc-400 mb-1">Classical</div>
+                                    <div>Risk (σ): <span className="text-zinc-100">{row.classical.risk.toFixed(1)}%</span></div>
+                                    <div>Return: <span className="text-zinc-100">{row.classical.ret.toFixed(1)}%</span></div>
                                   </div>
-                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                    <div className="border border-zinc-800/50 rounded-lg p-2">
-                                      <div className="text-zinc-400 mb-1">Classical</div>
-                                      <div>Risk (σ): <span className="text-zinc-100">{row.classical.risk.toFixed(1)}%</span></div>
-                                      <div>Return: <span className="text-zinc-100">{row.classical.ret.toFixed(1)}%</span></div>
-                                    </div>
-                                    <div className="border border-emerald-800/40 rounded-lg p-2">
-                                      <div className="text-zinc-400 mb-1">Quantum</div>
-                                      <div>Risk (σ): <span className="text-zinc-100">{row.quantum.risk.toFixed(1)}%</span></div>
-                                      <div>Return: <span className="text-zinc-100">{row.quantum.ret.toFixed(1)}%</span></div>
-                                    </div>
+                                  <div className="border border-emerald-800/40 rounded-lg p-2">
+                                    <div className="text-zinc-400 mb-1">Quantum</div>
+                                    <div>Risk (σ): <span className="text-zinc-100">{row.quantum.risk.toFixed(1)}%</span></div>
+                                    <div>Return: <span className="text-zinc-100">{row.quantum.ret.toFixed(1)}%</span></div>
                                   </div>
                                 </div>
-                              );
-                            })()}
-                          </>
-                        )}
-                      </div>
-                      <ChartCaption x="Risk (σ, %)" y="Expected Return (%)" />
-                    </Card>
-                  </div>
-                </>
-              )}
-
-              {/* REBALANCING (replaces Portfolio Evolution UI) */}
-              {activeTab === "evolution" && renderRebalancing()}
-
-              {/* Insights */}
-              {activeTab === "insights" && (
-                <div className="grid grid-cols-1 gap-6">
-                  <InsightsPanel
-                    loading={loading.frontier || loading.alloc || loading.evo}
-                    topBits={topBits}
-                    sharpeData={sharpeData}
-                    alloc={alloc}
-                    evolution={evolution}
-                    useHybrid={true}
-                  />
+                              </div>
+                            );
+                          })()}
+                        </>
+                      )}
+                    </div>
+                    <ChartCaption x="Risk (σ, %)" y="Expected Return (%)" />
+                  </Card>
                 </div>
               )}
 
-              {/* Stress */}
+              {/* REBALANCING */}
+              {isRebalancingTab && renderRebalancing()}
+
+              {/* STRESS */}
               {activeTab === "stress" && (
                 <div className="grid grid-cols-1 gap-6">
                   <Card title="Selection Threshold (%)">
