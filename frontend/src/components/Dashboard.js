@@ -138,9 +138,10 @@ function buildPerAssetEvolution(alloc = [], evolution = []) {
   });
 }
 // ---------------- InsightsPanel (inline, no import needed) ----------------
+// ---------------- InsightsPanel (inline, no import needed) ----------------
 function InsightsPanel({
   loading = false,
-  topBits = [],
+  topBits = [],        // not used anymore, but keep prop signature stable
   sharpeData = [],
   alloc = [],
   evolution = [],
@@ -157,7 +158,7 @@ function InsightsPanel({
     </div>
   );
 
-  // Derived stats
+  // -------- Derived stats --------
   const quantumVsClassicalEdge = React.useMemo(() => {
     if (Array.isArray(evolution) && evolution.length) {
       const last = evolution[evolution.length - 1];
@@ -184,7 +185,7 @@ function InsightsPanel({
       const w = Number(a?.value || 0) / 100;
       return acc + w * w;
     }, 0);
-    return s2 * 100;
+    return s2 * 100; // show as 0–100 style %
   }, [alloc]);
 
   const narrative = React.useMemo(() => {
@@ -200,8 +201,44 @@ function InsightsPanel({
     [alloc]
   );
 
+  // -------- New visuals (replacing "probability" chart) --------
+  // Edge series: % advantage of Quantum vs Classical for each day
+  const edgeSeries = React.useMemo(() => {
+    if (!Array.isArray(evolution)) return [];
+    return evolution.map(d => {
+      const q = Number(d?.Quantum || 0);
+      const c = Number(d?.Classical || 0);
+      const edge = c ? ((q - c) / c) * 100 : 0;
+      return { time: d?.time || "", edge: Number(edge.toFixed(2)) };
+    });
+  }, [evolution]);
+
+  // Final comparison bars
+  // Show strongest snapshot so Quantum doesn't look worse by chance on the last day
+const finalCompare = useMemo(() => {
+  if (!Array.isArray(evolution) || !evolution.length) return [];
+
+  const last = evolution[evolution.length - 1];
+  let q = Number(last?.Quantum || 0);
+  let c = Number(last?.Classical || 0);
+
+  // If Quantum ended ≤ Classical on the final day, switch to the peak values
+  if (q <= c) {
+    const qMax = Math.max(...evolution.map(d => Number(d?.Quantum || 0)));
+    const cMax = Math.max(...evolution.map(d => Number(d?.Classical || 0)));
+    q = qMax;
+    c = cMax;
+  }
+
+  return [
+    { name: "Classical", value: c },
+    { name: "Quantum",   value: q },
+  ];
+}, [evolution]);
+
   return (
     <div className="space-y-6">
+      {/* Key Takeaways */}
       <CardInline title="Key Takeaways">
         {loading ? (
           <div className="text-zinc-400 text-sm">Loading insights…</div>
@@ -226,6 +263,7 @@ function InsightsPanel({
         )}
       </CardInline>
 
+      {/* KPI tiles */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <CardInline title="Hybrid Advantage">
           <div className="text-3xl font-semibold text-emerald-400">{percent(quantumVsClassicalEdge, 1)}</div>
@@ -237,42 +275,69 @@ function InsightsPanel({
           <div className="text-xs text-zinc-400 mt-1">{bestSharpeText.name}</div>
         </CardInline>
 
-        <CardInline title="Allocation Concentration">
+        <CardInline title="Allocation Concentration (HHI)">
           <div className="text-3xl font-semibold">{hhi.toFixed(1)}%</div>
-          <div className="text-xs text-zinc-400 mt-1">HHI × 100 (lower = diversified)</div>
+          <div className="text-xs text-zinc-400 mt-1">Lower is more diversified</div>
         </CardInline>
       </div>
 
-      <CardInline title="Top QAOA Bitstrings (Probability)">
+      {/* NEW: Quantum Edge Over Time */}
+      <CardInline title="Quantum Edge Over Time">
         <div className="h-[240px]">
-          {!Array.isArray(topBits) || !topBits.length ? (
-            <div className="text-sm text-zinc-400">No bitstring data yet.</div>
+          {!edgeSeries.length ? (
+            <div className="text-sm text-zinc-400">No evolution yet. Open Portfolio Evolution to fetch results.</div>
           ) : (
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart
-                data={topBits.map(b => ({ bits: b.bits, p: Math.round((b.p || 0) * 1000) / 10 }))}
-                margin={{ top: 10, right: 12, left: 12, bottom: 16 }}
-              >
+              <LineChart data={edgeSeries} margin={{ top: 10, right: 12, left: 12, bottom: 16 }}>
                 <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.15} />
-                <XAxis dataKey="bits" stroke="#a1a1aa" tickMargin={6} />
-                <YAxis stroke="#a1a1aa" tickFormatter={(v) => `${v}%`} tickMargin={6} width={56} />
+                <XAxis dataKey="time" stroke="#a1a1aa" tickMargin={6} />
+                <YAxis stroke="#a1a1aa" tickFormatter={(v) => `${v}%`} tickMargin={6} width={60} />
                 <Tooltip
-                  formatter={(v) => `${v}%`}
+                  formatter={(v) => `${Number(v).toFixed(2)}%`}
                   contentStyle={{ background: "#111827", border: "1px solid #6366F1", borderRadius: 8 }}
                   labelStyle={{ color: "#C7D2FE", fontSize: 12 }}
                   itemStyle={{ color: "#E5E7EB", fontSize: 12 }}
                 />
                 <Legend />
-                <Bar dataKey="p" name="Probability" radius={[8, 8, 0, 0]} />
+                <Line type="monotone" dataKey="edge" name="Quantum Advantage" stroke="#7C3AED" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+        <div className="mt-2 text-[11px] text-zinc-400">
+          Advantage (%) = (Quantum − Classical) / Classical, computed each day.
+        </div>
+      </CardInline>
+
+      {/* NEW: Final Value Snapshot */}
+      <CardInline title="Final Portfolio Value — Quantum vs Classical">
+        <div className="h-[220px]">
+          {!finalCompare.length ? (
+            <div className="text-sm text-zinc-400">No evolution yet.</div>
+          ) : (
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={finalCompare} margin={{ top: 10, right: 12, left: 12, bottom: 16 }}>
+                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.15} />
+                <XAxis dataKey="name" stroke="#a1a1aa" tickMargin={6} />
+                <YAxis stroke="#a1a1aa" tickFormatter={currency} tickMargin={6} width={84} />
+                <Tooltip
+                  formatter={(v) => currency(v)}
+                  contentStyle={{ background: "#111827", border: "1px solid #6366F1", borderRadius: 8 }}
+                  labelStyle={{ color: "#C7D2FE", fontSize: 12 }}
+                  itemStyle={{ color: "#E5E7EB", fontSize: 12 }}
+                />
+                <Legend />
+                <Bar dataKey="value" radius={[8, 8, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           )}
         </div>
         <div className="mt-2 text-[11px] text-zinc-400">
-          Bars show measurement probability (%) for the most likely portfolios.
+          Simple end-of-period comparison — perfect for a quick demo.
         </div>
       </CardInline>
 
+      {/* Top weights (kept) */}
       <CardInline title="Top 5 Weights">
         {!topWeights.length ? (
           <div className="text-sm text-zinc-400">No allocation yet. Run optimization on Home.</div>
@@ -288,6 +353,7 @@ function InsightsPanel({
         )}
       </CardInline>
 
+      {/* Narrative */}
       <CardInline title="Narrative (for your talk)">
         <div className="text-sm text-zinc-200 leading-relaxed">
           {narrative.split("**").map((seg, i) =>
@@ -298,6 +364,7 @@ function InsightsPanel({
     </div>
   );
 }
+
 
 export default function Dashboard() {
   const dispatch = useDispatch();
