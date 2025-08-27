@@ -1,3 +1,4 @@
+// src/components/Navbar.js
 import React from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { setActiveTab, setDataset, setRiskLevel } from "../store/uiSlice";
@@ -29,10 +30,9 @@ export default function Navbar() {
           <TabBtn id="evolution" label="Portfolio Evolution" active={activeTab === "evolution"} onClick={handleTab} />
           <TabBtn id="insights" label="Insights" active={activeTab === "insights"} onClick={handleTab} />
           <TabBtn id="stress" label="Stress Testing" active={activeTab === "stress"} onClick={handleTab} />
-          <TabBtn id="explain" label="Explain" active={activeTab === "explain"} onClick={handleTab} />
         </div>
 
-        {/* Right: quick dataset + risk selectors (kept here; constraints live on Home) */}
+        {/* Right: quick dataset + risk selectors */}
         <div className="ml-auto flex items-center gap-2">
           <select
             value={dataset}
