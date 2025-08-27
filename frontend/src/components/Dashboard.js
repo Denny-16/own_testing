@@ -20,7 +20,7 @@ import InsightsPanel from "./InsightsPanel.js";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend, BarChart, Bar, CartesianGrid, Label,
-  ReferenceLine, ScatterChart, Scatter
+  ReferenceLine, ScatterChart, Scatter,
 } from "recharts";
 
 import {
@@ -28,11 +28,10 @@ import {
   fetchSharpeComparison,
   runQAOASelection,
   fetchAllocation,
-  // backtestEvolution,  // removed (we now use fetchRebalance)
   stressSim,
   fetchCompareAccuracy,
   fetchCompareRiskReturn,
-  fetchRebalance, // NEW for evolution via FastAPI
+  fetchRebalance, // <-- backend /api/rebalance
 } from "../lib/api.js";
 
 // ---------- UI bits ----------
@@ -68,7 +67,7 @@ const tooltipStyles = {
   wrapperStyle: { zIndex: 50 },
 };
 
-// Clean, company-centric tooltip for the Compare scatter
+// Clean tooltip for Compare scatter
 function CompareTooltip({ active, payload }) {
   if (!active || !Array.isArray(payload) || !payload.length) return null;
   const p = payload[0]?.payload || {};
@@ -100,36 +99,35 @@ export default function Dashboard() {
     optimizeStatus, optimizeResult,
   } = useSelector((s) => s.ui);
 
-  // Safe risk label
   const safeRiskLevel = (typeof riskLevel === "string" && riskLevel.length) ? riskLevel : "medium";
   const riskPretty = safeRiskLevel.charAt(0).toUpperCase() + safeRiskLevel.slice(1);
 
   const [activeSlice, setActiveSlice] = useState(null);
+
+  // Compare tab state
   const [compareLoading, setCompareLoading] = useState(false);
-  const [accuracy, setAccuracy] = useState(null);
-  const [riskReturn, setRiskReturn] = useState(null);
+  const [accuracy, setAccuracy] = useState(null); // {metric,quantum,classical}
+  const [riskReturn, setRiskReturn] = useState(null); // {dataset, points:[{name, classical:{risk,ret}, quantum:{risk,ret}}]}
   const [selectedAsset, setSelectedAsset] = useState(null);
 
-  // Section controls (kept for other pages)
-  const [rebalanceFreq, setRebalanceFreq] = useState("Monthly"); // UI only (not used in FastAPI)
-  const [useHybrid, setUseHybrid] = useState(true);              // demo-only
+  // Demo-only bits kept for other charts/sections
   const [stress, setStress] = useState({ ratesBps: 200, oilPct: 15, techPct: -8, fxPct: 3 });
 
   // Data
   const [frontier, setFrontier] = useState([]);
   const [sharpeData, setSharpeData] = useState([]);
-  const [alloc, setAlloc] = useState([]); // [{name, value}] with value in %
-  const [evolution, setEvolution] = useState([]);
+  const [alloc, setAlloc] = useState([]); // [{name, value}] in %
+  const [evolution, setEvolution] = useState([]); // aggregate series
+  const [assetEvolution, setAssetEvolution] = useState([]); // per-asset mini series
   const [topBits, setTopBits] = useState([]);
   const [stressed, setStressed] = useState({ bars: [], ruinLine: 0 });
 
-  // Loading flags (for demo endpoints)
+  // Loading flags (demo endpoints)
   const [loading, setLoading] = useState({
     frontier: false, sharpe: false, qaoa: false, alloc: false, evo: false, stress: false
   });
 
-  // ---------- Effects ----------
-  // Initial load (demo endpoints for charts/sections). We no longer prefill evolution here.
+  // ---------- Initial demo data for non-FastAPI charts ----------
   useEffect(() => {
     (async () => {
       try {
@@ -145,7 +143,7 @@ export default function Dashboard() {
 
         const allocData = await fetchAllocation({
           topBits: bits[0]?.bits || "10101",
-          hybrid: useHybrid,
+          hybrid: true,
           threshold,
           dataset,
         });
@@ -160,7 +158,7 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Compare tab: accuracy + risk/return points
+  // ---------- Compare tab ----------
   useEffect(() => { setSelectedAsset(null); }, [riskReturn]);
 
   useEffect(() => {
@@ -193,7 +191,7 @@ export default function Dashboard() {
     })();
   }, [activeTab, riskLevel, dataset, maxAssets, alloc, dispatch]);
 
-  // Frontier updates (demo)
+  // ---------- Frontier updates (demo) ----------
   useEffect(() => {
     (async () => {
       try {
@@ -210,7 +208,7 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [safeRiskLevel, threshold]);
 
-  // Evolution (FastAPI rebalancing). Fetch when the Evolution tab is open.
+  // ---------- Evolution: FastAPI /api/rebalance ----------
   useEffect(() => {
     if (activeTab !== "evolution") return;
 
@@ -219,21 +217,19 @@ export default function Dashboard() {
         setLoading((l) => ({ ...l, evo: true }));
 
         const assetsCount = Math.max(1, Number(maxAssets || 5));
-
         const reb = await fetchRebalance({
           dataset,                      // "nifty50" | "nasdaq" | "crypto"
-          budget: assetsCount,          // number of assets to select
+          budget: assetsCount,          // number of assets
           risk: riskLevel,              // "low" | "medium" | "high"
           totalInvestment: initialEquity,
           timeHorizon: Math.max(1, Number(timeHorizon || 30)),
         });
 
-        // Map to chart keys
         const series = Array.isArray(reb?.evolution)
           ? reb.evolution.map(d => ({
-              time: d.time,            // "Day 1", "Day 2", ...
-              Quantum: d.Future,       // plot Future as Quantum
-              Classical: d.Current,    // plot Current as Classical
+              time: d.time,            // "Day 1"
+              Quantum: d.Future,       // plot FastAPI Future as Quantum
+              Classical: d.Current,    // plot FastAPI Current as Classical
             }))
           : [];
 
@@ -248,7 +244,7 @@ export default function Dashboard() {
     })();
   }, [activeTab, dataset, maxAssets, riskLevel, initialEquity, timeHorizon, dispatch]);
 
-  // Stress chart (demo)
+  // ---------- Stress chart (demo backend) ----------
   useEffect(() => {
     (async () => {
       try {
@@ -281,22 +277,20 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stress, threshold, initialEquity, alloc]);
 
-  // Map backend optimize → alloc (REAL FastAPI weights)
+  // ---------- Map backend optimize → alloc (REAL FastAPI weights) ----------
   useEffect(() => {
     if (!optimizeResult) return;
 
-    // Prefer normalized shape from our Node backend
     if (Array.isArray(optimizeResult.allocation) && optimizeResult.allocation.length) {
       setAlloc(
         optimizeResult.allocation.map((a) => ({
           name: a.name,
-          value: Number(a.value) || 0, // already %
+          value: Number(a.value) || 0, // %
         }))
       );
       return;
     }
 
-    // Fallback if raw FastAPI JSON somehow reaches the frontend
     if (Array.isArray(optimizeResult.portfolio) && optimizeResult.portfolio.length) {
       setAlloc(
         optimizeResult.portfolio.map((p) => ({
@@ -309,7 +303,41 @@ export default function Dashboard() {
     }
   }, [optimizeResult]);
 
-  // Backend optimize on click
+  // ---------- Per-asset mini series builder ----------
+  function seededRng(seedStr) {
+    let s = Array.from(String(seedStr || "x")).reduce((a, c) => a + c.charCodeAt(0), 0) >>> 0;
+    return () => {
+      s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
+      return ((s >>> 0) % 10000) / 10000;
+    };
+  }
+  function buildAssetEvolution({ alloc = [], totalSeries = [] }) {
+    if (!alloc.length || !totalSeries.length) return [];
+    const weights = alloc.map(a => Math.max(0, Number(a.value) || 0));
+    const wSum = weights.reduce((a, b) => a + b, 0) || 1;
+    const norm = weights.map(w => w / wSum);
+
+    return alloc.map((a, idx) => {
+      const rnd = seededRng(a.name + "::qevo");
+      const w = norm[idx];
+      const series = totalSeries.map((row) => {
+        const baseC = row.Classical * w;
+        const baseQ = row.Quantum   * w;
+        const jitter = (rnd() - 0.5) * 0.002;  // ±0.1%
+        const jitter2 = (rnd() - 0.5) * 0.002;
+        const cur = Math.round(baseC * (1 + jitter));
+        const fut = Math.round(baseQ * (1 + 0.001 + jitter2)); // Future a bit ahead
+        return { time: row.time, Current: cur, Future: fut };
+      });
+      return { name: a.name, series };
+    });
+  }
+
+  useEffect(() => {
+    setAssetEvolution(buildAssetEvolution({ alloc, totalSeries: evolution }));
+  }, [alloc, evolution]);
+
+  // ---------- Backend optimize on click ----------
   async function handleRunQuantum() {
     try {
       await dispatch(runOptimizeThunk()).unwrap();
@@ -317,37 +345,6 @@ export default function Dashboard() {
       dispatch(addToast({ type: "error", msg: e?.message || "Failed to optimize. Try again." }));
     }
   }
-  async function handleRunRebalance() {
-  try {
-    setLoading((l) => ({ ...l, evo: true }));
-
-    const assetsCount = Math.max(1, Number(maxAssets || 5));
-
-    const reb = await fetchRebalance({
-      dataset,                      // "nifty50" | "nasdaq" | "crypto"
-      budget: assetsCount,          // number of assets to select
-      risk: riskLevel,              // "low" | "medium" | "high"
-      totalInvestment: initialEquity,
-      timeHorizon: Math.max(1, Number(timeHorizon || 30)),
-    });
-
-    const series = Array.isArray(reb?.evolution)
-      ? reb.evolution.map(d => ({
-          time: d.time,
-          Quantum: d.Future,   // Future -> Quantum
-          Classical: d.Current // Current -> Classical
-        }))
-      : [];
-
-    setEvolution(series);
-  } catch (e) {
-    console.error(e);
-    dispatch(addToast({ type: "error", msg: "Rebalancing failed to load." }));
-    setEvolution([]);
-  } finally {
-    setLoading((l) => ({ ...l, evo: false }));
-  }
-}
 
   // ---------- Derived ----------
   const datasetLabel =
@@ -363,9 +360,8 @@ export default function Dashboard() {
 
   const showSharpe = !options?.length || options.includes("Sharpe Ratio");
   const showStress = !options?.length || options.includes("Stress Testing");
-  const showClassical = !options?.length || options.includes("Classical Comparison");
 
-  // ---------- Home (FastAPI-aligned inputs) ----------
+  // ---------- Home (FastAPI inputs) ----------
   const renderHome = () => (
     <div className="max-w-7xl mx-auto px-5 py-6 md:py-8 space-y-6">
       <Card title="Optimization Inputs (FastAPI)">
@@ -497,16 +493,7 @@ export default function Dashboard() {
                         style={{ transition: "all 120ms ease" }}
                       />
                     ))}
-                    <Label
-                      value={
-                        activeSlice === null
-                          ? "Weights (%)"
-                          : `${alloc[activeSlice]?.name ?? ""} · ${percent(alloc[activeSlice]?.value || 0, 0)}`
-                      }
-                      position="center"
-                      fill="#e5e7eb"
-                      fontSize={12}
-                    />
+                    <Label value={centerLabelText} position="center" fill="#e5e7eb" fontSize={12} />
                   </Pie>
                 </PieChart>
               </ResponsiveContainer>
@@ -541,7 +528,6 @@ export default function Dashboard() {
         {activeTab === null ? (
           <div className="flex-1 overflow-auto">{renderHome()}</div>
         ) : (
-          // Section pages
           <div className="flex-1 overflow-auto">
             <div className="max-w-7xl mx-auto px-5 py-6 md:py-8 space-y-6">
               {/* Section header */}
@@ -567,7 +553,7 @@ export default function Dashboard() {
               {activeTab === "compare" && (
                 <>
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {/* Accuracy bar */}
+                    {/* Accuracy bar (demo) */}
                     <Card title="Model Accuracy (Demo)">
                       <div className="h-[280px]">
                         {compareLoading ? (
@@ -630,10 +616,8 @@ export default function Dashboard() {
                                   tickMargin={6}
                                   width={64}
                                 />
-
                                 <Tooltip content={<CompareTooltip />} cursor={{ strokeDasharray: "3 3" }} />
                                 <Legend />
-
                                 <Scatter
                                   name="Classical"
                                   data={riskReturn.points.map(p => ({
@@ -699,114 +683,90 @@ export default function Dashboard() {
                 </>
               )}
 
+              {/* Evolution */}
               {activeTab === "evolution" && (
-  <>
-    {/* Inputs that directly map to FastAPI /rebalance */}
-    <div className="grid grid-cols-1 lg:grid-cols-5 gap-3">
-      {/* Dataset (use your Navbar state; this just shows it read-only OR switchable if you prefer) */}
-      <Card title="Dataset">
-        {/* If you want editable here, turn this into a <select> and dispatch setDataset */}
-        <div className="text-sm text-zinc-200">{datasetLabel}</div>
-      </Card>
+                <>
+                  {/* Only Time (days) control */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <Card title="Time (days)">
+                      <input
+                        type="number"
+                        min={1}
+                        className="w-full bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2"
+                        value={timeHorizon}
+                        onChange={(e) => dispatch(setTimeHorizon(Math.max(1, Number(e.target.value) || 1)))}
+                      />
+                      <div className="mt-2 text-xs text-zinc-400">
+                        Changing days will refetch the Quantum vs Classical projection.
+                      </div>
+                    </Card>
+                  </div>
 
-      <Card title="Risk">
-        <select
-          className="bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2 w-full"
-          value={riskLevel}
-          onChange={(e) => dispatch(setRiskLevel(e.target.value))}
-        >
-          <option value="low">Low</option>
-          <option value="medium">Medium</option>
-          <option value="high">High</option>
-        </select>
-      </Card>
+                  {/* Aggregate series */}
+                  <div className="grid grid-cols-1 gap-6">
+                    <Card title="Portfolio Value Over Time">
+                      <div className="h-[320px]">
+                        {loading.evo ? (
+                          <Skeleton className="h-full w-full" />
+                        ) : !evolution?.length ? (
+                          <EmptyState title="No evolution yet" subtitle="Enter days to fetch the projection." />
+                        ) : (
+                          <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={evolution} margin={{ top: 10, right: 12, left: 24, bottom: 8 }}>
+                              <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.15} />
+                              <XAxis dataKey="time" stroke="#a1a1aa" tickMargin={6} />
+                              <YAxis stroke="#a1a1aa" tickFormatter={(v) => currency(v)} tickMargin={6} width={88} />
+                              <Tooltip
+                                formatter={(v) => currency(v)}
+                                contentStyle={tooltipStyles.contentStyle}
+                                labelStyle={tooltipStyles.labelStyle}
+                                itemStyle={tooltipStyles.itemStyle}
+                                wrapperStyle={tooltipStyles.wrapperStyle}
+                              />
+                              <Legend />
+                              <Line type="monotone" dataKey="Quantum" stroke="#7C3AED" strokeWidth={2} dot={false} />
+                              <Line type="monotone" dataKey="Classical" stroke="#3B82F6" strokeWidth={2} dot={false} />
+                            </LineChart>
+                          </ResponsiveContainer>
+                        )}
+                      </div>
+                      <ChartCaption x="Time (days)" y="Portfolio Value (₹)" />
+                    </Card>
+                  </div>
 
-      <Card title="Assets (budget)">
-        <input
-          type="number"
-          min={1}
-          step={1}
-          className="w-full bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2"
-          value={maxAssets}
-          onChange={(e) => dispatch(setMaxAssets(e.target.value))}
-        />
-      </Card>
-
-      <Card title="Total Investment (₹)">
-        <input
-          type="number"
-          min={0}
-          step={1000}
-          className="w-full bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2"
-          value={initialEquity}
-          onChange={(e) => dispatch(setInitialEquity(Number(e.target.value) || 0))}
-        />
-      </Card>
-
-      <Card title="Time (days)">
-        <input
-          type="number"
-          min={1}
-          className="w-full bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2"
-          value={timeHorizon}
-          onChange={(e) => dispatch(setTimeHorizon(Number(e.target.value) || 1))}
-        />
-      </Card>
-    </div>
-
-    {/* Action row */}
-    <div className="flex items-center gap-3">
-      <button
-  onClick={handleRunRebalance}
-  className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm disabled:opacity-60"
-  disabled={loading.evo}
-  title="Calls backend /api/rebalance → FastAPI /rebalance"
->
-  {loading.evo ? "Running..." : "Run Rebalance"}
-</button>
-
-
-      {/* These two are just kept for your existing UI feel; they do not affect FastAPI */}
-      <div className="ml-auto grid grid-cols-2 gap-3">
-        
-      </div>
-    </div>
-
-    {/* Chart */}
-    <div className="grid grid-cols-1 gap-6 mt-3">
-      <Card title="Portfolio Value Over Time">
-        <div className="h-[320px]">
-          {loading.evo ? (
-            <Skeleton className="h-full w-full" />
-          ) : !evolution?.length ? (
-            <EmptyState title="No evolution yet" subtitle="Set inputs and click Run Rebalance." />
-          ) : (
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={evolution} margin={{ top: 10, right: 12, left: 24, bottom: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.15} />
-                <XAxis dataKey="time" stroke="#a1a1aa" tickMargin={6} />
-                <YAxis stroke="#a1a1aa" tickFormatter={(v) => currency(v)} tickMargin={6} width={88} />
-                <Tooltip
-                  formatter={(v) => currency(v)}
-                  contentStyle={tooltipStyles.contentStyle}
-                  labelStyle={tooltipStyles.labelStyle}
-                  itemStyle={tooltipStyles.itemStyle}
-                  wrapperStyle={tooltipStyles.wrapperStyle}
-                />
-                <Legend />
-                {/* Two lines: Future=Quantum, Current=Classical */}
-                <Line type="monotone" dataKey="Classical" stroke="#7C3AED" strokeWidth={2} dot />
-                <Line type="monotone" dataKey="Quantum" stroke="#3B82F6" strokeWidth={2} dot />
-              </LineChart>
-            </ResponsiveContainer>
-          )}
-        </div>
-        <ChartCaption x="Time (days)" y="Portfolio Value (₹)" />
-      </Card>
-    </div>
-  </>
-)}
-
+                  {/* Per-asset mini charts (3x2 grid) */}
+                  {!!assetEvolution.length && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                      {assetEvolution.slice(0, 6).map((a, i) => (
+                        <Card key={i} title={a.name}>
+                          <div className="h-[180px]">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <LineChart data={a.series} margin={{ top: 6, right: 8, left: 12, bottom: 4 }}>
+                                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.12} />
+                                <XAxis dataKey="time" stroke="#a1a1aa" tick={{ fontSize: 10 }} interval="preserveStartEnd" />
+                                <YAxis
+                                  stroke="#a1a1aa"
+                                  width={70}
+                                  tick={{ fontSize: 10 }}
+                                  tickFormatter={(v) => `₹${Math.round(v).toLocaleString("en-IN")}`}
+                                />
+                                <Tooltip
+                                  formatter={(v, n) => [`₹${Math.round(v).toLocaleString("en-IN")}`, n]}
+                                  contentStyle={tooltipStyles.contentStyle}
+                                  labelStyle={tooltipStyles.labelStyle}
+                                  itemStyle={tooltipStyles.itemStyle}
+                                />
+                                <Line type="monotone" dataKey="Future" stroke="#7C3AED" strokeWidth={1.8} dot={false} />
+                                <Line type="monotone" dataKey="Current" stroke="#3B82F6" strokeWidth={1.6} dot={false} />
+                              </LineChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </Card>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
 
               {activeTab === "insights" && (
                 <div className="grid grid-cols-1 gap-6">
@@ -816,7 +776,7 @@ export default function Dashboard() {
                     sharpeData={sharpeData}
                     alloc={alloc}
                     evolution={evolution}
-                    useHybrid={useHybrid}
+                    useHybrid={true}
                   />
                 </div>
               )}
