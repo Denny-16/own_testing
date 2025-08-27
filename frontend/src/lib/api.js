@@ -66,3 +66,13 @@ export async function fetchCompareRiskReturn({ dataset, maxAssets, assetNames, w
     weights: Array.isArray(weights) ? weights : [],
   });
 }
+// --- Rebalancing (FastAPI via Node backend) ---
+export async function fetchRebalance({ dataset, budget, risk, totalInvestment, timeHorizon }) {
+  return post("/api/rebalance", {
+    dataset,                  // "nifty50" | "nasdaq" | "crypto"
+    budget: Number(budget),   // number of assets to pick
+    risk,                     // "low" | "medium" | "high"
+    totalInvestment: Number(totalInvestment),
+    timeHorizon: Number(timeHorizon),
+  });
+}

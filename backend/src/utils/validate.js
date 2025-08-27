@@ -54,10 +54,51 @@ const NormalizedOptimizeResponseSchema = z.object({
     gamma: z.number().optional(),
   }).partial(),
 });
-
+const RebalanceRequestSchema = z.object({
+  // UI inputs we need; Node will map to FastAPI keys
+  dataset: z.string().min(1),                 // "nifty50" | "nasdaq" | "crypto"
+  budget: z.number().int().positive(),        // number of assets
+  risk: z.enum(['low','medium','high']),
+  totalInvestment: z.number().positive(),
+  timeHorizon: z.number().int().min(5).max(365).default(30), // days for chart (Node-only)
+});
+const RebalanceResponseSchema = z.object({
+  runId: z.string(),
+  dataset: z.string(),
+  current: z.array(z.object({
+    asset: z.string(),
+    weight: z.number(),           // 0..1
+    expected_return: z.number(),  // %
+  })).default([]),
+  future: z.array(z.object({
+    asset: z.string(),
+    weight: z.number(),
+    expected_return: z.number(),
+  })).default([]),
+  actions: z.array(z.object({
+    action: z.string(),           // BUY/SELL/HOLD
+    asset: z.string(),
+    current_pct: z.number(),
+    future_pct: z.number(),
+    change_pct: z.number(),
+  })).default([]),
+   evolution: z.array(z.object({
+    time: z.string(),
+    Current: z.number(),
+    Future: z.number(),
+  })).default([]),
+  
+  summary: z.object({
+    muCurrent: z.number(),
+    muFuture: z.number(),
+  }),
+});
 module.exports = {
   OptimizeRequestSchema,
   FastApiOptimizeResponseSchema,
   NormalizedOptimizeResponseSchema,
   DatasetEnum,
+  RebalanceRequestSchema,
+  RebalanceResponseSchema,
+
 };

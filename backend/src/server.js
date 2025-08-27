@@ -31,6 +31,7 @@ const compareRoutes = require("./routes/compare.routes");
 
 // ...
 app.use("/api/compare", compareRoutes);
+app.use('/api/rebalance', require('./routes/rebalance.routes'));
 
 // start server
 app.listen(config.port, () => {
