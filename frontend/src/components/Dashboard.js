@@ -15,12 +15,11 @@ import { runOptimizeThunk } from "../store/uiSlice";
 import EmptyState from "./EmptyState.js";
 import Skeleton from "./Skeleton.js";
 import { downloadJSON, downloadCSV } from "../utils/exporters.js";
-
-
+import InsightsPanel from "./InsightsPanel.js";
 
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, Legend, BarChart, Bar, CartesianGrid, Label,
+  PieChart, Pie, Legend, BarChart, Bar, CartesianGrid,
   ReferenceLine, ScatterChart, Scatter
 } from "recharts";
 
@@ -32,7 +31,7 @@ import {
   stressSim,
   fetchCompareAccuracy,
   fetchCompareRiskReturn,
-  fetchRebalance, // <-- make sure this exists in src/lib/api.js (POST /api/rebalance)
+  fetchRebalance, // POST /api/rebalance
 } from "../lib/api.js";
 
 /* ---------- UI bits ---------- */
@@ -56,19 +55,7 @@ const COLORS = ["#7C3AED", "#3B82F6", "#10B981", "#F59E0B", "#EF4444", "#22C55E"
 const currency = (v) => `₹${Number(v).toLocaleString("en-IN")}`;
 const percent = (v, digits = 0) => `${Number(v).toFixed(digits)}%`;
 
-const tooltipStyles = {
-  contentStyle: {
-    background: "#111827",
-    border: "1px solid #6366F1",
-    borderRadius: 8,
-    boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-  },
-  labelStyle: { color: "#C7D2FE", fontSize: 12 },
-  itemStyle: { color: "#E5E7EB", fontSize: 12 },
-  wrapperStyle: { zIndex: 50 },
-};
-
-// Clean tooltip for Compare scatter
+/* ---------- Compare tooltip ---------- */
 function CompareTooltip({ active, payload }) {
   if (!active || !Array.isArray(payload) || !payload.length) return null;
   const p = payload[0]?.payload || {};
@@ -89,282 +76,17 @@ function CompareTooltip({ active, payload }) {
   );
 }
 
-/* ---------- Per-asset evolution helpers ---------- */
-function strHash(s = "") {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return h >>> 0;
-}
-function seededRng(seed) {
-  let x = (seed || 1) >>> 0;
-  return () => {
-    x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
-    return ((x >>> 0) % 10000) / 10000;
-  };
-}
-/**
- * Build Quantum/Classical mini series for each asset from:
- * - aggregate evolution (Future=Quantum, Current=Classical)
- * - asset weight (value%)
- * - tiny, seeded wiggle so curves are visible and stable per name
- */
-function buildPerAssetEvolution(alloc = [], evolution = []) {
-  const days = Array.isArray(evolution) ? evolution.length : 0;
-  if (!days || !Array.isArray(alloc) || !alloc.length) return [];
-
-  const qAgg = evolution.map(d => Number(d?.Quantum) || 0);
-  const cAgg = evolution.map(d => Number(d?.Classical) || 0);
-
-  return alloc.slice(0, 6).map(({ name, value }) => {
-    const w = Math.max(0, Number(value) || 0) / 100; // 0..1
-    const rnd = seededRng(strHash(String(name)));
-
-    // keep Quantum visibly higher to distinguish; Classical a bit lower
-    const qK = 1.05 + rnd() * 0.06; // 1.05 .. 1.11
-    const cK = 0.94 + rnd() * 0.04; // 0.94 .. 0.98
-
-    const series = qAgg.map((q, i) => {
-      const c = cAgg[i];
-      const jiggleQ = 0.997 + (rnd() - 0.5) * 0.012;
-      const jiggleC = 0.997 + (rnd() - 0.5) * 0.012;
-      return {
-        time: evolution[i]?.time || `Day ${i + 1}`,
-        Quantum: Math.round(q * w * qK * jiggleQ),
-        Classical: Math.round(c * w * cK * jiggleC),
-      };
-    });
-
-    return { name, series };
-  });
-}
-// ---------------- InsightsPanel (inline, no import needed) ----------------
-// ---------------- InsightsPanel (inline, no import needed) ----------------
-function InsightsPanel({
-  loading = false,
-  topBits = [],        // not used anymore, but keep prop signature stable
-  sharpeData = [],
-  alloc = [],
-  evolution = [],
-  useHybrid = true,
-}) {
-  const currency = (v) => `₹${Number(v || 0).toLocaleString("en-IN")}`;
-  const percent = (v, d = 1) => `${Number(v || 0).toFixed(d)}%`;
-
-  // tiny Card for this panel
-  const CardInline = ({ title, children, className = "" }) => (
-    <div className={`bg-[#0f1422] border border-zinc-800/70 rounded-2xl p-4 ${className}`}>
-      {title ? <h3 className="text-[15px] md:text-lg font-semibold mb-2">{title}</h3> : null}
-      {children}
-    </div>
-  );
-
-  // -------- Derived stats --------
-  const quantumVsClassicalEdge = React.useMemo(() => {
-    if (Array.isArray(evolution) && evolution.length) {
-      const last = evolution[evolution.length - 1];
-      const q = Number(last?.Quantum || 0);
-      const c = Number(last?.Classical || 0);
-      if (q && c) return ((q - c) / c) * 100;
-    }
-    return 0;
-  }, [evolution]);
-
-  const bestSharpeText = React.useMemo(() => {
-    if (Array.isArray(sharpeData) && sharpeData.length) {
-      const best = [...sharpeData].sort((a, b) => (b?.sharpe || 0) - (a?.sharpe || 0))[0];
-      const name = best?.model ?? "Hybrid";
-      const val = best?.sharpe ?? 1.42;
-      return { name, val };
-    }
-    return { name: "Hybrid", val: 1.42 };
-  }, [sharpeData]);
-
-  const hhi = React.useMemo(() => {
-    if (!Array.isArray(alloc) || !alloc.length) return 0;
-    const s2 = alloc.reduce((acc, a) => {
-      const w = Number(a?.value || 0) / 100;
-      return acc + w * w;
-    }, 0);
-    return s2 * 100; // show as 0–100 style %
-  }, [alloc]);
-
-  const narrative = React.useMemo(() => {
-    const edge = quantumVsClassicalEdge;
-    const best = bestSharpeText;
-    const hhiTxt = hhi.toFixed(1);
-    const hybridTxt = useHybrid ? "on — subset by QAOA, weights by a classical solver" : "off";
-    return `Over this backtest, Quantum ${edge >= 0 ? "outperformed" : "underperformed"} Classical by ${Math.abs(edge).toFixed(1)}%. The best Sharpe among models is **${best.name}** at ${best.val}. Allocation concentration (HHI) is about ${hhiTxt} — ${hhi < 25 ? "well diversified" : "moderately concentrated"}. Hybrid mode is ${hybridTxt}.`;
-  }, [quantumVsClassicalEdge, bestSharpeText, hhi, useHybrid]);
-
-  const topWeights = React.useMemo(
-    () => Array.isArray(alloc) ? [...alloc].sort((a,b)=> (b?.value||0)-(a?.value||0)).slice(0,5) : [],
-    [alloc]
-  );
-
-  // -------- New visuals (replacing "probability" chart) --------
-  // Edge series: % advantage of Quantum vs Classical for each day
-  const edgeSeries = React.useMemo(() => {
-    if (!Array.isArray(evolution)) return [];
-    return evolution.map(d => {
-      const q = Number(d?.Quantum || 0);
-      const c = Number(d?.Classical || 0);
-      const edge = c ? ((q - c) / c) * 100 : 0;
-      return { time: d?.time || "", edge: Number(edge.toFixed(2)) };
-    });
-  }, [evolution]);
-
-  // Final comparison bars
-  // Show strongest snapshot so Quantum doesn't look worse by chance on the last day
-const finalCompare = useMemo(() => {
-  if (!Array.isArray(evolution) || !evolution.length) return [];
-
-  const last = evolution[evolution.length - 1];
-  let q = Number(last?.Quantum || 0);
-  let c = Number(last?.Classical || 0);
-
-  // If Quantum ended ≤ Classical on the final day, switch to the peak values
-  if (q <= c) {
-    const qMax = Math.max(...evolution.map(d => Number(d?.Quantum || 0)));
-    const cMax = Math.max(...evolution.map(d => Number(d?.Classical || 0)));
-    q = qMax;
-    c = cMax;
-  }
-
-  return [
-    { name: "Classical", value: c },
-    { name: "Quantum",   value: q },
-  ];
-}, [evolution]);
-
-  return (
-    <div className="space-y-6">
-      {/* Key Takeaways */}
-      <CardInline title="Key Takeaways">
-        {loading ? (
-          <div className="text-zinc-400 text-sm">Loading insights…</div>
-        ) : (
-          <ul className="list-disc pl-5 text-sm space-y-2 text-zinc-200">
-            <li>
-              Over this backtest, Quantum {quantumVsClassicalEdge >= 0 ? "outperformed" : "underperformed"} Classical by{" "}
-              <span className="font-semibold">{percent(Math.abs(quantumVsClassicalEdge), 1)}</span>.
-            </li>
-            <li>
-              The best Sharpe among models is <span className="font-semibold">{bestSharpeText.name}</span> at{" "}
-              <span className="font-semibold">{bestSharpeText.val}</span>.
-            </li>
-            <li>
-              Allocation concentration (HHI) is about <span className="font-semibold">{hhi.toFixed(1)}</span> —{" "}
-              {hhi < 25 ? "well diversified" : "moderately concentrated"}.
-            </li>
-            <li>
-              Hybrid mode is <span className="font-semibold">{useHybrid ? "ON" : "OFF"}</span> — subset by QAOA, weights by a classical solver.
-            </li>
-          </ul>
-        )}
-      </CardInline>
-
-      {/* KPI tiles */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <CardInline title="Hybrid Advantage">
-          <div className="text-3xl font-semibold text-emerald-400">{percent(quantumVsClassicalEdge, 1)}</div>
-          <div className="text-xs text-zinc-400 mt-1">Quantum vs Classical total return</div>
-        </CardInline>
-
-        <CardInline title="Best Sharpe">
-          <div className="text-3xl font-semibold">{bestSharpeText.val}</div>
-          <div className="text-xs text-zinc-400 mt-1">{bestSharpeText.name}</div>
-        </CardInline>
-
-        <CardInline title="Allocation Concentration (HHI)">
-          <div className="text-3xl font-semibold">{hhi.toFixed(1)}%</div>
-          <div className="text-xs text-zinc-400 mt-1">Lower is more diversified</div>
-        </CardInline>
-      </div>
-
-      {/* NEW: Quantum Edge Over Time */}
-      <CardInline title="Quantum Edge Over Time">
-        <div className="h-[240px]">
-          {!edgeSeries.length ? (
-            <div className="text-sm text-zinc-400">No evolution yet. Open Portfolio Evolution to fetch results.</div>
-          ) : (
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={edgeSeries} margin={{ top: 10, right: 12, left: 12, bottom: 16 }}>
-                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.15} />
-                <XAxis dataKey="time" stroke="#a1a1aa" tickMargin={6} />
-                <YAxis stroke="#a1a1aa" tickFormatter={(v) => `${v}%`} tickMargin={6} width={60} />
-                <Tooltip
-                  formatter={(v) => `${Number(v).toFixed(2)}%`}
-                  contentStyle={{ background: "#111827", border: "1px solid #6366F1", borderRadius: 8 }}
-                  labelStyle={{ color: "#C7D2FE", fontSize: 12 }}
-                  itemStyle={{ color: "#E5E7EB", fontSize: 12 }}
-                />
-                <Legend />
-                <Line type="monotone" dataKey="edge" name="Quantum Advantage" stroke="#7C3AED" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
-          )}
-        </div>
-        <div className="mt-2 text-[11px] text-zinc-400">
-          Advantage (%) = (Quantum − Classical) / Classical, computed each day.
-        </div>
-      </CardInline>
-
-      {/* NEW: Final Value Snapshot */}
-      <CardInline title="Final Portfolio Value — Quantum vs Classical">
-        <div className="h-[220px]">
-          {!finalCompare.length ? (
-            <div className="text-sm text-zinc-400">No evolution yet.</div>
-          ) : (
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={finalCompare} margin={{ top: 10, right: 12, left: 12, bottom: 16 }}>
-                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.15} />
-                <XAxis dataKey="name" stroke="#a1a1aa" tickMargin={6} />
-                <YAxis stroke="#a1a1aa" tickFormatter={currency} tickMargin={6} width={84} />
-                <Tooltip
-                  formatter={(v) => currency(v)}
-                  contentStyle={{ background: "#111827", border: "1px solid #6366F1", borderRadius: 8 }}
-                  labelStyle={{ color: "#C7D2FE", fontSize: 12 }}
-                  itemStyle={{ color: "#E5E7EB", fontSize: 12 }}
-                />
-                <Legend />
-                <Bar dataKey="value" radius={[8, 8, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          )}
-        </div>
-        <div className="mt-2 text-[11px] text-zinc-400">
-          Simple end-of-period comparison — perfect for a quick demo.
-        </div>
-      </CardInline>
-
-      {/* Top weights (kept) */}
-      <CardInline title="Top 5 Weights">
-        {!topWeights.length ? (
-          <div className="text-sm text-zinc-400">No allocation yet. Run optimization on Home.</div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-2 text-sm">
-            {topWeights.map((w, i) => (
-              <div key={i} className="flex items-center justify-between border-b border-zinc-800/60 py-1">
-                <div className="truncate pr-3">{w.name}</div>
-                <div className="font-medium">{percent(w.value, 1)}</div>
-              </div>
-            ))}
-          </div>
-        )}
-      </CardInline>
-
-      {/* Narrative */}
-      <CardInline title="Narrative (for your talk)">
-        <div className="text-sm text-zinc-200 leading-relaxed">
-          {narrative.split("**").map((seg, i) =>
-            i % 2 ? <strong key={i} className="font-semibold">{seg}</strong> : <span key={i}>{seg}</span>
-          )}
-        </div>
-      </CardInline>
-    </div>
-  );
-}
-
+const tooltipStyles = {
+  contentStyle: {
+    background: "#111827",
+    border: "1px solid #6366F1",
+    borderRadius: 8,
+    boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+  },
+  labelStyle: { color: "#C7D2FE", fontSize: 12 },
+  itemStyle: { color: "#E5E7EB", fontSize: 12 },
+  wrapperStyle: { zIndex: 50 },
+};
 
 export default function Dashboard() {
   const dispatch = useDispatch();
@@ -389,14 +111,19 @@ export default function Dashboard() {
   // Data
   const [frontier, setFrontier] = useState([]);
   const [sharpeData, setSharpeData] = useState([]);
-  const [alloc, setAlloc] = useState([]); // [{name, value}] (value in %)
-  const [evolution, setEvolution] = useState([]); // [{time, Quantum, Classical}]
+  const [alloc, setAlloc] = useState([]);        // [{name, value}] (value in %)
+  const [evolution, setEvolution] = useState([]); // kept for InsightsPanel compatibility
   const [topBits, setTopBits] = useState([]);
   const [stressed, setStressed] = useState({ bars: [], ruinLine: 0 });
 
   const [loading, setLoading] = useState({
     frontier: false, sharpe: false, qaoa: false, alloc: false, evo: false, stress: false
   });
+
+  /* ---------- NEW: Rebalancing data ---------- */
+  const [rbLoading, setRbLoading] = useState(false);
+  const [futureDataset, setFutureDataset] = useState("NIFTY50_Future");
+  const [rebal, setRebal] = useState(null);
 
   /* ---------- Initial demo loads (frontier/sharpe/qaoa/alloc) ---------- */
   useEffect(() => {
@@ -479,42 +206,32 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [safeRiskLevel, threshold]);
 
-  /* ---------- Evolution (FastAPI via Node /api/rebalance) ---------- */
+  /* ---------- REBALANCING (replaces old Evolution UI) ---------- */
   useEffect(() => {
-    if (activeTab !== "evolution") return;
-
+    if (activeTab !== "evolution") return; // keep the same tab key; label changes below
     (async () => {
       try {
-        setLoading((l) => ({ ...l, evo: true }));
-
-        const payload = {
-          dataset,
+        setRbLoading(true);
+        const res = await fetchRebalance({
+          dataset_option: dataset,
+          future_dataset_option: futureDataset,            // allow any of the *_Future options
           budget: Math.max(1, Number(maxAssets || 5)),
-          risk: riskLevel,
-          totalInvestment: Number(initialEquity) || 0,
-          timeHorizon: Math.max(1, Number(timeHorizon || 30)),
-        };
+          risk_factor: riskLevel,
+          total_investment: Number(initialEquity) || 0,
+        });
+        setRebal(res);
 
-        const reb = await fetchRebalance(payload);
-
-        const series = Array.isArray(reb?.evolution)
-          ? reb.evolution.map(d => ({
-              time: d.time,
-              Quantum: d.Future,   // plot Future as Quantum
-              Classical: d.Current // plot Current as Classical
-            }))
-          : [];
-
-        setEvolution(series);
+        // Optionally keep a tiny evolution summary for Insights panel (not required)
+        setEvolution([]); // clear; not used in Rebalancing
       } catch (e) {
         console.error(e);
         dispatch(addToast({ type: "error", msg: "Rebalancing failed to load." }));
-        setEvolution([]);
+        setRebal(null);
       } finally {
-        setLoading((l) => ({ ...l, evo: false }));
+        setRbLoading(false);
       }
     })();
-  }, [activeTab, dataset, maxAssets, riskLevel, initialEquity, timeHorizon, dispatch]);
+  }, [activeTab, dataset, futureDataset, maxAssets, riskLevel, initialEquity, dispatch]);
 
   /* ---------- Stress chart (demo) ---------- */
   useEffect(() => {
@@ -591,17 +308,11 @@ export default function Dashboard() {
     dataset === "nasdaq" ? "NASDAQ" :
     dataset || "Select Dataset";
 
-  const centerLabelText =
-    activeSlice === null
-      ? "Weights (%)"
-      : `${alloc[activeSlice]?.name ?? ""} · ${percent(alloc[activeSlice]?.value || 0, 0)}`;
-
   const showStress = !options?.length || options.includes("Stress Testing");
 
-  // Per-asset mini charts (built from alloc + aggregate evolution)
-  const assetEvolution = useMemo(
-    () => buildPerAssetEvolution(alloc, evolution),
-    [alloc, evolution]
+  const pieData = useMemo(
+    () => (alloc || []).map((a, i) => ({ ...a, fill: COLORS[i % COLORS.length] })),
+    [alloc]
   );
 
   /* ---------- Home (FastAPI-aligned inputs) ---------- */
@@ -711,42 +422,16 @@ export default function Dashboard() {
                   />
                   <Legend verticalAlign="bottom" height={28} wrapperStyle={{ color: "#a1a1aa", fontSize: 12 }} iconSize={8} />
                   <Pie
-                    data={alloc}
+                    data={pieData}
                     dataKey="value"
                     nameKey="name"
                     cx="50%"
                     cy="50%"
                     innerRadius={60}
-                    outerRadius={activeSlice === null ? 92 : 96}
+                    outerRadius={92}
                     paddingAngle={1}
                     isAnimationActive={false}
-                    onMouseEnter={(_, i) => setActiveSlice(i)}
-                    onMouseLeave={() => setActiveSlice(null)}
-                    onTouchStart={(_, i) => setActiveSlice(i)}
-                    onTouchEnd={() => setActiveSlice(null)}
-                    label={false}
-                  >
-                    {alloc.map((_, i) => (
-                      <Cell
-                        key={i}
-                        fill={COLORS[i % COLORS.length]}
-                        fillOpacity={activeSlice === null ? 1 : activeSlice === i ? 1 : 0.95}
-                        stroke="#e5e7eb33"
-                        strokeWidth={activeSlice === i ? 2 : 1}
-                        style={{ transition: "all 120ms ease" }}
-                      />
-                    ))}
-                    <Label
-                      value={
-                        activeSlice === null
-                          ? "Weights (%)"
-                          : `${alloc[activeSlice]?.name ?? ""} · ${percent(alloc[activeSlice]?.value || 0, 0)}`
-                      }
-                      position="center"
-                      fill="#e5e7eb"
-                      fontSize={12}
-                    />
-                  </Pie>
+                  />
                 </PieChart>
               </ResponsiveContainer>
             )}
@@ -770,6 +455,179 @@ export default function Dashboard() {
     </div>
   );
 
+  /* ---------- REBALANCING UI (in place of old Evolution) ---------- */
+  const renderRebalancing = () => {
+  // dataset → allowed future options (exactly one per dataset)
+  const futureOptionsMap = {
+    crypto: ["Crypto_Future"],
+    nasdaq: ["NASDAQ_Future"],
+    nifty50: ["NIFTY50_Future"],
+  };
+  const allowedFutureOptions = futureOptionsMap[dataset] || [];
+
+  return (
+    <div className="grid grid-cols-1 gap-6">
+      <Card title="Rebalancing Inputs">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+          {/* Future Dataset Option (restricted by dataset) */}
+          <div className="space-y-1">
+            <label className="block text-zinc-300">Future Dataset Option</label>
+            <select
+              className="w-full bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2"
+              value={futureDataset}
+              onChange={(e) => setFutureDataset(e.target.value)}
+              disabled={!allowedFutureOptions.length}
+            >
+              {allowedFutureOptions.length ? (
+                allowedFutureOptions.map((opt) => (
+                  <option key={opt} value={opt}>{opt}</option>
+                ))
+              ) : (
+                <option value="">Select a dataset first</option>
+              )}
+            </select>
+            <div className="text-xs text-zinc-500">
+              {dataset
+                ? `Based on "${dataset.toUpperCase()}" dataset`
+                : "Choose a dataset on Home first"}
+            </div>
+          </div>
+
+          {/* Assets (budget) */}
+          <div className="space-y-1">
+            <label className="block text-zinc-300">Assets (budget)</label>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              className="w-full bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2"
+              value={maxAssets}
+              onChange={(e) => dispatch(setMaxAssets(e.target.value))}
+            />
+          </div>
+
+          {/* Total Investment */}
+          <div className="space-y-1">
+            <label className="block text-zinc-300">Total Investment (₹)</label>
+            <input
+              type="number"
+              className="w-full bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2"
+              value={initialEquity}
+              onChange={(e) => dispatch(setInitialEquity(Number(e.target.value) || 0))}
+            />
+          </div>
+        </div>
+      </Card>
+
+      {rbLoading ? (
+        <Skeleton className="h-[280px] w-full" />
+      ) : !rebal ? (
+        <EmptyState title="No rebalance result yet" subtitle="Adjust inputs above." />
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Current Portfolio */}
+          <Card title="📊 Current Portfolio">
+            <div className="overflow-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-[#0f1422] text-zinc-300">
+                  <tr>
+                    <th className="p-2 text-left">Asset</th>
+                    <th className="p-2 text-right">Weight</th>
+                    <th className="p-2 text-right">Allocation</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rebal.current_portfolio?.map((a, i) => (
+                    <tr key={i} className="border-t border-zinc-800/50">
+                      <td className="p-2">{a.asset}</td>
+                      <td className="p-2 text-right">{percent(a.percentage, 1)}</td>
+                      <td className="p-2 text-right">{currency(a.investment)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+
+          {/* Future Portfolio */}
+          <Card title="🔮 Future Portfolio">
+            <div className="overflow-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-[#0f1422] text-zinc-300">
+                  <tr>
+                    <th className="p-2 text-left">Asset</th>
+                    <th className="p-2 text-right">Weight</th>
+                    <th className="p-2 text-right">Allocation</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rebal.future_portfolio?.map((a, i) => (
+                    <tr key={i} className="border-t border-zinc-800/50">
+                      <td className="p-2">{a.asset}</td>
+                      <td className="p-2 text-right">{percent(a.percentage, 1)}</td>
+                      <td className="p-2 text-right">{currency(a.investment)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+
+          {/* Recommendations */}
+          <Card title="✅ Recommendations">
+            {!rebal.recommendations?.length ? (
+              <div className="text-sm text-zinc-400">No actions.</div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {rebal.recommendations.map((r, i) => (
+                  <div
+                    key={i}
+                    className="p-3 rounded-lg border"
+                    style={{
+                      borderColor:
+                        r.action === "BUY" || r.action === "INCREASE" ? "#059669" :
+                        r.action === "SELL" ? "#DC2626" : "#52525b",
+                      background:
+                        r.action === "BUY" || r.action === "INCREASE" ? "#064e3b33" :
+                        r.action === "SELL" ? "#7f1d1d33" : "#18181b33",
+                    }}
+                  >
+                    <div className="font-semibold">{r.action}: {r.asset}</div>
+                    <div className="text-xs text-zinc-400 mt-1">
+                      Current: {currency(r.current_allocation || 0)} ({percent(r.current_pct || 0, 1)})
+                    </div>
+                    <div className="text-xs text-zinc-400">
+                      Future: {currency(r.future_allocation || 0)} ({percent(r.future_pct || 0, 1)})
+                    </div>
+                    <div className="text-xs mt-1">
+                      Change: <span className="font-medium">
+                        {currency(
+                          (r.change_allocation || 0).toFixed
+                            ? r.change_allocation.toFixed(0)
+                            : r.change_allocation || 0
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          {/* Summary */}
+          <Card title="📌 Summary">
+            <div className="flex flex-wrap gap-6 text-sm">
+              <div>Sell: <b>{rebal?.summary?.sell ?? 0}</b></div>
+              <div>Buy: <b>{rebal?.summary?.buy ?? 0}</b></div>
+              <div>Rebalance/Hold: <b>{rebal?.summary?.rebalance_or_hold ?? 0}</b></div>
+            </div>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+};
+
   /* ---------- Page ---------- */
   return (
     <div className="flex min-h-screen bg-[#0b0f1a] text-gray-100">
@@ -786,7 +644,7 @@ export default function Dashboard() {
               <div className="bg-[#0f1422] border border-zinc-800/70 rounded-xl p-4">
                 <h2 className="text-lg font-semibold tracking-tight">
                   {activeTab === "compare" && "Quantum vs Classical"}
-                  {activeTab === "evolution" && "Portfolio Evolution"}
+                  {activeTab === "evolution" && "Rebalancing"}
                   {activeTab === "insights" && "Quantum Insights"}
                   {activeTab === "stress" && "Stress Testing"}
                 </h2>
@@ -909,61 +767,10 @@ export default function Dashboard() {
                 </>
               )}
 
-              {/* Evolution — ONLY Time control + per-asset grid */}
-              {activeTab === "evolution" && (
-                <>
-                  <div className="grid grid-cols-1 md:grid-cols-1 gap-3">
-                    <Card title="Time (days)">
-                      <input
-                        type="number"
-                        min={1}
-                        className="w-full bg-[#0b0f1a] border border-zinc-700 rounded-lg px-3 py-2"
-                        value={timeHorizon}
-                        onChange={(e) => dispatch(setTimeHorizon(Math.max(1, Number(e.target.value) || 1)))}
-                      />
-                    </Card>
-                  </div>
+              {/* REBALANCING (replaces Portfolio Evolution UI) */}
+              {activeTab === "evolution" && renderRebalancing()}
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-                    {loading.evo ? (
-                      <Card><Skeleton className="h-[220px] w-full" /></Card>
-                    ) : !assetEvolution.length ? (
-                      <Card>
-                        <EmptyState
-                          title="No asset charts yet"
-                          subtitle="Run Quantum Optimize on Home to get assets."
-                        />
-                      </Card>
-                    ) : (
-                      assetEvolution.map((a) => (
-                        <Card key={a.name} title={a.name}>
-                          <div className="h-[220px]">
-                            <ResponsiveContainer width="100%" height="100%">
-                              <LineChart data={a.series} margin={{ top: 8, right: 10, left: 12, bottom: 6 }}>
-                                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.12} />
-                                <XAxis dataKey="time" stroke="#a1a1aa" tickMargin={4} />
-                                <YAxis stroke="#a1a1aa" tickFormatter={(v) => currency(v)} width={72} />
-                                <Tooltip
-                                  formatter={(v, name) => [currency(v), name]}
-                                  contentStyle={tooltipStyles.contentStyle}
-                                  labelStyle={tooltipStyles.labelStyle}
-                                  itemStyle={tooltipStyles.itemStyle}
-                                  wrapperStyle={tooltipStyles.wrapperStyle}
-                                />
-                                <Legend />
-                                <Line type="monotone" dataKey="Quantum" stroke="#7C3AED" strokeWidth={2} dot={false} />
-                                <Line type="monotone" dataKey="Classical" stroke="#3B82F6" strokeWidth={2} dot={false} />
-                              </LineChart>
-                            </ResponsiveContainer>
-                          </div>
-                        </Card>
-                      ))
-                    )}
-                  </div>
-                </>
-              )}
-
-              {/* Insights (unchanged demo) */}
+              {/* Insights */}
               {activeTab === "insights" && (
                 <div className="grid grid-cols-1 gap-6">
                   <InsightsPanel
@@ -977,7 +784,7 @@ export default function Dashboard() {
                 </div>
               )}
 
-              {/* Stress (demo) */}
+              {/* Stress */}
               {activeTab === "stress" && (
                 <div className="grid grid-cols-1 gap-6">
                   <Card title="Selection Threshold (%)">
@@ -1034,7 +841,7 @@ export default function Dashboard() {
                                 fontSize: 12,
                               }}
                             />
-                            <Bar dataKey="value" fill="#ef4444" opacity={0.85} radius={[8, 8, 0, 0]} />
+                            <Bar dataKey="value" opacity={0.85} radius={[8, 8, 0, 0]} />
                           </BarChart>
                         </ResponsiveContainer>
                       )}
@@ -1044,7 +851,7 @@ export default function Dashboard() {
                 </div>
               )}
 
-              {/* Footer / Exports (optional) */}
+              {/* Footer / Exports */}
               {showStress && (
                 <div className="pt-2 pb-8 flex flex-wrap gap-2">
                   <button
